@@ -36,7 +36,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "adventure": {
         "enabled": True,
-        "option": "encounter",
+        "option_name": "",
         "start_time": "20:00",
         "times_per_day": 3,
     },
@@ -126,8 +126,8 @@ class ConfigStore:
             raise ValueError("work.job_sub_event 不能小于 0")
         if config["work"].get("strategy", "highest_total") != "highest_total":
             raise ValueError("work.strategy 目前仅支持 highest_total")
-        if config["adventure"]["option"] not in {"encounter", "coins", "skill", "climate"}:
-            raise ValueError("adventure.option 无效")
+        if not isinstance(config["adventure"].get("option_name", ""), str):
+            raise ValueError("adventure.option_name 必须是字符串")
         hours, minutes = map(int, str(config["adventure"]["start_time"]).split(":"))
         if not (0 <= hours <= 23 and 0 <= minutes <= 59):
             raise ValueError("adventure.start_time 必须是 HH:MM")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from qqpet_app.client import (
+    AdventureOption,
     NapCatClient,
     PageRules,
     QQPetError,
@@ -104,14 +105,10 @@ class ProtoAndClientTests(unittest.TestCase):
         self.assertTrue(rules.allows((6000, 6400, 6501)))
         self.assertFalse(rules.allows((6000, 6100, 6101)))
 
-    def test_rule_based_scene_rejects_path_not_offered_by_server(self) -> None:
+    def test_removed_legacy_adventure_path_is_rejected(self) -> None:
         client = NapCatClient("http://unused", "token", "pet", transport=lambda *_: {})
         with self.assertRaises(QQPetError):
-            client.start_scene(
-                "adventure",
-                "coins",
-                PageRules(paths=((6000, 6500, 6501),)),
-            )
+            client.scene_path("adventure", "coins")
 
     def test_school_start_uses_live_stage_and_highest_attribute_reward(self) -> None:
         calls = 0
@@ -263,6 +260,51 @@ class ProtoAndClientTests(unittest.TestCase):
         result = client.start_work(hired_user_id="friend-user", hired_pet_id="friend-pet")
         self.assertTrue(result.hired_friend)
         self.assertEqual(result.story_id, "6400_friend")
+
+    def test_adventure_start_uses_live_option_and_real_begin_packet(self) -> None:
+        calls = 0
+        option = (
+            field_string(1, "打招呼")
+            + field_string(6, "体力5，清洁5")
+            + field_string(7, "45秒")
+            + field_string(10, "可能发生特殊的事情，包括偶遇哦")
+            + field_varint(50, 1)
+        )
+
+        def transport(command: str, data: str) -> dict:
+            nonlocal calls
+            calls += 1
+            outer = parse_message(bytes.fromhex(data))
+            request = parse_message(first_bytes(outer, 4))
+            if calls == 1:
+                self.assertEqual(command, "OidbSvcTrpcTcp.0x9ab2_1")
+                self.assertEqual(first_varint(request, 1), 6700)
+                self.assertEqual(first_string(request, 2), "pet")
+                self.assertEqual(first_string(request, 3), "")
+                self.assertEqual(first_varint(request, 100), 2)
+                return oidb_response(39602, 1, field_bytes(1, option))
+            self.assertEqual(command, "OidbSvcTrpcTcp.0x975e_1")
+            self.assertEqual(first_varint(request, 1), 6700)
+            self.assertEqual(first_string(request, 2), "pet")
+            self.assertEqual(first_string(request, 3), "")
+            self.assertEqual(first_string(request, 6), "打招呼")
+            self.assertEqual(first_varint(request, 7), 0)
+            self.assertEqual(first_varint(request, 100), 2)
+            return oidb_response(38750, 1, field_string(1, "6700_created"))
+
+        client = NapCatClient("http://unused", "token", "pet", transport=transport)
+        result = client.start_adventure()
+        self.assertEqual(
+            result.option,
+            AdventureOption(
+                "打招呼",
+                cost="体力5，清洁5",
+                duration="45秒",
+                description="可能发生特殊的事情，包括偶遇哦",
+                can_do=True,
+            ),
+        )
+        self.assertEqual(result.story_id, "6700_created")
 
     def test_food_inventory_uses_empty_request_and_decodes_response(self) -> None:
         def transport(_command: str, data: str) -> dict:

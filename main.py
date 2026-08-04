@@ -33,7 +33,6 @@ SETTING_FIELDS = [
     ("work.times_per_day", "每日打工上限（0 不限）", int),
     ("work.employ_friend", "有可用好友时优先雇佣", bool),
     ("adventure.enabled", "启用冒险", bool),
-    ("adventure.option", "冒险类型 encounter/coins/skill/climate", str),
     ("adventure.start_time", "冒险开始时间 HH:MM", str),
     ("adventure.times_per_day", "每日冒险上限", int),
     ("care.enabled", "启用状态照顾", bool),
@@ -81,6 +80,10 @@ class MainWindow(tk.Tk):
         self.job_options: dict[str, tuple[int, int]] = {
             "自动选择开放职业中总收益最高岗位": (0, 0)
         }
+        self.adventure_var = tk.StringVar(value="自动选择服务器当前可用冒险")
+        self.adventure_options: dict[str, str] = {
+            "自动选择服务器当前可用冒险": ""
+        }
         self.status_vars = {
             key: tk.StringVar(value="--")
             for key in ("connection", "gold", "food", "mood", "hunger", "clean", "total", "story", "counts")
@@ -89,6 +92,7 @@ class MainWindow(tk.Tk):
         self._load_settings()
         self.after(500, self._refresh_school_courses)
         self.after(700, self._refresh_work_jobs)
+        self.after(900, self._refresh_adventure_options)
         self.after(100, self._drain_events)
         if auto_start:
             self.after(250, self._start)
@@ -213,9 +217,35 @@ class MainWindow(tk.Tk):
         self.job_status_label.grid(
             row=job_row + 1, column=1, sticky="w", padx=6, pady=(0, 5)
         )
+        adventure_row = job_row + 2
+        ttk.Label(form, text="服务器冒险选项").grid(
+            row=adventure_row, column=0, sticky="w", padx=6, pady=5
+        )
+        adventure_box = ttk.Frame(form)
+        adventure_box.grid(row=adventure_row, column=1, sticky="ew", padx=6, pady=5)
+        self.adventure_combo = ttk.Combobox(
+            adventure_box,
+            textvariable=self.adventure_var,
+            state="readonly",
+            width=41,
+            values=tuple(self.adventure_options),
+        )
+        self.adventure_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.adventure_refresh_button = ttk.Button(
+            adventure_box,
+            text="刷新",
+            command=self._refresh_adventure_options,
+        )
+        self.adventure_refresh_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.adventure_status_label = ttk.Label(
+            form, text="将从服务器读取真实冒险目录", foreground="#666"
+        )
+        self.adventure_status_label.grid(
+            row=adventure_row + 1, column=1, sticky="w", padx=6, pady=(0, 5)
+        )
         form.columnconfigure(1, weight=1)
         ttk.Button(form, text="保存并立即生效", command=self._save_settings).grid(
-            row=job_row + 2, column=0, columnspan=2, sticky="ew", padx=6, pady=14
+            row=adventure_row + 2, column=0, columnspan=2, sticky="ew", padx=6, pady=14
         )
 
     def _status_row(self, parent: ttk.Frame, title: str, key: str, small: bool = False) -> None:
@@ -246,6 +276,14 @@ class MainWindow(tk.Tk):
             self.job_var.set(label)
         else:
             self.job_var.set("自动选择开放职业中总收益最高岗位")
+        adventure_name = str(config["adventure"].get("option_name", ""))
+        if adventure_name:
+            label = f"已保存冒险“{adventure_name}”（刷新后显示详情）"
+            self.adventure_options[label] = adventure_name
+            self.adventure_combo.configure(values=tuple(self.adventure_options))
+            self.adventure_var.set(label)
+        else:
+            self.adventure_var.set("自动选择服务器当前可用冒险")
 
     def _refresh_school_courses(self) -> None:
         self.course_refresh_button.configure(state=tk.DISABLED)
@@ -294,6 +332,26 @@ class MainWindow(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _refresh_adventure_options(self) -> None:
+        self.adventure_refresh_button.configure(state=tk.DISABLED)
+        self.adventure_status_label.configure(text="正在读取服务器冒险目录…")
+
+        def worker() -> None:
+            try:
+                config = self.config_store.data
+                client = NapCatClient(
+                    config["napcat"]["url"],
+                    config["napcat"]["token"],
+                    config["account"]["pet_id"],
+                    float(config["napcat"]["timeout_seconds"]),
+                )
+                options = client.query_adventure_options()
+                self.events.put(("adventure_options", options))
+            except Exception as exc:
+                self.events.put(("adventure_options_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _save_settings(self) -> None:
         config = self.config_store.data
         try:
@@ -312,6 +370,10 @@ class MainWindow(tk.Tk):
             config["work"]["career_type"] = career_type
             config["work"]["job_sub_event"] = job_sub_event
             config["work"]["strategy"] = "highest_total"
+            selected_adventure = self.adventure_var.get()
+            if selected_adventure not in self.adventure_options:
+                raise ValueError("请刷新并重新选择冒险")
+            config["adventure"]["option_name"] = self.adventure_options[selected_adventure]
             self.config_store.save(config)
         except Exception as exc:
             messagebox.showerror("设置无效", str(exc), parent=self)
@@ -434,6 +496,35 @@ class MainWindow(tk.Tk):
                 elif kind == "work_jobs_error":
                     self.job_status_label.configure(text=f"岗位读取失败：{payload}")
                     self.job_refresh_button.configure(state=tk.NORMAL)
+                elif kind == "adventure_options":
+                    previous = str(
+                        self.config_store.data["adventure"].get("option_name", "")
+                    )
+                    automatic = "自动选择服务器当前可用冒险"
+                    options = {automatic: ""}
+                    selected_label = automatic
+                    available_count = 0
+                    for option in payload:
+                        status = "可执行" if option.can_do else "暂不可用"
+                        label = (
+                            f"{option.name}｜{option.duration}｜"
+                            f"{option.cost}｜{status}"
+                        )
+                        options[label] = option.name
+                        if option.can_do:
+                            available_count += 1
+                        if option.name == previous:
+                            selected_label = label
+                    self.adventure_options = options
+                    self.adventure_combo.configure(values=tuple(options))
+                    self.adventure_var.set(selected_label)
+                    self.adventure_status_label.configure(
+                        text=f"服务器返回 {len(payload)} 项；当前可执行 {available_count} 项"
+                    )
+                    self.adventure_refresh_button.configure(state=tk.NORMAL)
+                elif kind == "adventure_options_error":
+                    self.adventure_status_label.configure(text=f"冒险读取失败：{payload}")
+                    self.adventure_refresh_button.configure(state=tk.NORMAL)
         except queue.Empty:
             pass
         self.after(100, self._drain_events)

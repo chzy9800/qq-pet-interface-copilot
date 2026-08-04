@@ -209,6 +209,26 @@ class WorkStartResult:
 
 
 @dataclass(frozen=True)
+class AdventureOption:
+    name: str
+    sub_event_type: int = 0
+    reward: str = ""
+    duration: str = ""
+    cost: str = ""
+    description: str = ""
+    can_do: bool = False
+    unavailable_reason: str = ""
+
+
+@dataclass(frozen=True)
+class AdventureStartResult:
+    option: AdventureOption
+    story_id: str = ""
+    hired_friend: bool = False
+    response: OidbResponse | None = None
+
+
+@dataclass(frozen=True)
 class PageRules:
     trace: str = ""
     paths: tuple[tuple[int, int, int], ...] = ()
@@ -240,6 +260,8 @@ class NapCatClient:
     WORK_OVERVIEW = ("OidbSvcTrpcTcp.0x9b60_1", 39776, 1)
     WORK_JOBS = ("OidbSvcTrpcTcp.0x9ab2_1", 39602, 1)
     WORK_START = ("OidbSvcTrpcTcp.0x975e_1", 38750, 1)
+    ADVENTURE_OPTIONS = ("OidbSvcTrpcTcp.0x9ab2_1", 39602, 1)
+    ADVENTURE_START = ("OidbSvcTrpcTcp.0x975e_1", 38750, 1)
 
     SCENES = {
         "school": {
@@ -251,12 +273,6 @@ class NapCatClient:
             "culture": (6000, 6400, 6401),
             "physical": (6000, 6400, 6501),
             "art": (6000, 6400, 6601),
-        },
-        "adventure": {
-            "encounter": (6000, 6700, 6701),
-            "coins": (6000, 6700, 6711),
-            "skill": (6000, 6700, 6721),
-            "climate": (6000, 6700, 6731),
         },
     }
 
@@ -738,6 +754,85 @@ class NapCatClient:
             response=response,
         )
 
+    def query_adventure_options(
+        self, hired_pet_id: str = ""
+    ) -> tuple[AdventureOption, ...]:
+        body = (
+            field_varint(1, 6700)
+            + field_string(2, self.pet_id)
+            + field_string(3, hired_pet_id)
+            + field_varint(100, 2)
+        )
+        root = parse_message(self.send_oidb(*self.ADVENTURE_OPTIONS, body).body)
+        options: list[AdventureOption] = []
+        for value in root.get(1, []):
+            if value.wire_type != 2:
+                continue
+            item = parse_message(bytes(value.value))
+            options.append(
+                AdventureOption(
+                    name=first_string(item, 1),
+                    sub_event_type=first_varint(item, 52),
+                    cost=first_string(item, 6),
+                    duration=first_string(item, 7),
+                    reward=first_string(item, 8),
+                    description=first_string(item, 10) or first_string(item, 14),
+                    can_do=bool(first_varint(item, 50)),
+                    unavailable_reason=first_string(item, 51),
+                )
+            )
+        return tuple(options)
+
+    def select_adventure_option(
+        self, preferred_name: str = "", hired_pet_id: str = ""
+    ) -> AdventureOption:
+        options = [
+            option
+            for option in self.query_adventure_options(hired_pet_id)
+            if option.can_do and option.name
+        ]
+        if preferred_name:
+            selected = next(
+                (option for option in options if option.name == preferred_name),
+                None,
+            )
+            if selected is None:
+                raise QQPetError(f"指定冒险“{preferred_name}”当前不可用")
+            return selected
+        if not options:
+            raise QQPetError("服务器当前没有可执行的冒险")
+        return options[0]
+
+    def start_adventure(
+        self,
+        preferred_name: str = "",
+        hired_user_id: str = "",
+        hired_pet_id: str = "",
+    ) -> AdventureStartResult:
+        if bool(hired_user_id) != bool(hired_pet_id):
+            raise QQPetError("冒险雇佣好友时必须同时提供好友账号和宠物 ID")
+        option = self.select_adventure_option(preferred_name, hired_pet_id)
+        body = (
+            field_varint(1, 6700)
+            + field_string(2, self.pet_id)
+            + field_string(3, "")
+        )
+        if hired_user_id and hired_pet_id:
+            friend = field_string(1, hired_user_id) + field_string(2, hired_pet_id)
+            body += field_bytes(4, friend)
+        body += field_string(6, option.name)
+        if option.sub_event_type > 0:
+            body += field_varint(7, option.sub_event_type)
+        body += field_varint(100, 2)
+        response = self.send_oidb(*self.ADVENTURE_START, body)
+        story_id = first_string(parse_message(response.body), 1)
+        return AdventureStartResult(
+            option=option,
+            story_id=story_id,
+            hired_friend=bool(hired_user_id and hired_pet_id),
+            response=response,
+        )
+
     def start_scene(self, scene: str, option: str, rules: PageRules | None = None) -> OidbResponse:
         if scene == "school":
             result = self.start_school(option)
@@ -748,6 +843,11 @@ class NapCatClient:
             result = self.start_work()
             if result.response is None:  # pragma: no cover - dataclass invariant
                 raise QQPetError("开工接口未返回响应")
+            return result.response
+        if scene == "adventure":
+            result = self.start_adventure()
+            if result.response is None:  # pragma: no cover - dataclass invariant
+                raise QQPetError("冒险接口未返回响应")
             return result.response
         page, event_type, sub_event = self.scene_path(scene, option)
         if rules is not None and not rules.allows((page, event_type, sub_event)):

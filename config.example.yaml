@@ -28,7 +28,7 @@
   },
   "adventure": {
     "enabled": true,
-    "option": "encounter",
+    "option_name": "",
     "start_time": "20:00",
     "times_per_day": 3
   },

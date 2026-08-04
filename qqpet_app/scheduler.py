@@ -382,6 +382,24 @@ class Scheduler:
                 self.log("好友雇佣列表未返回可用对象，本次按正式协议无好友开工")
             self.activity(f"已开工：{job.name}，等待倒计时确认")
             return action
+        if action == "adventure":
+            self.activity("正在获取服务器冒险选项")
+            preferred_name = str(config["adventure"].get("option_name", ""))
+            result = client.start_adventure(preferred_name)
+            self.progress.set_pending("adventure")
+            option = result.option
+            response_story = f"，storyId={result.story_id}" if result.story_id else ""
+            selection = "指定" if preferred_name else "服务器当前可用"
+            friend_text = "，已雇佣好友" if result.hired_friend else ""
+            reward_text = f"，奖励 {option.reward}" if option.reward else ""
+            self.log(
+                f"已选择{selection}冒险“{option.name}”"
+                f"（{option.duration}，{option.cost}{reward_text}），"
+                f"真实冒险指令已发送{response_story}{friend_text}；"
+                "等待状态接口确认倒计时"
+            )
+            self.activity(f"已开始冒险：{option.name}，等待倒计时确认")
+            return action
         rules = client.query_page_rules(6000)
         path = client.scene_path(action, option)
         if not rules.allows(path):

@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 
 from qqpet_app.client import (
+    AdventureOption,
+    AdventureStartResult,
     PageRules,
     PetValues,
     SchoolCourse,
@@ -167,6 +169,55 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(scheduler.run_once(), "work")
             self.assertEqual(fake.started, (0, 0, "highest_total"))
             self.assertEqual(scheduler.progress.snapshot()["pending"]["kind"], "work")
+
+    def test_run_once_starts_adventure_through_real_option_interface(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["adventure"]["enabled"] = True
+            config["adventure"]["start_time"] = "00:00"
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            store.save(config)
+
+            class FakeClient:
+                started = None
+
+                def query_values(self):
+                    return PetValues(gold=1000, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    from qqpet_app.client import FoodInventory
+
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+                def start_adventure(self, preferred_name):
+                    self.started = preferred_name
+                    return AdventureStartResult(
+                        AdventureOption(
+                            "打招呼",
+                            duration="45秒",
+                            cost="体力5，清洁5",
+                            can_do=True,
+                        ),
+                        "6700_created",
+                    )
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "adventure")
+            self.assertEqual(fake.started, "")
+            self.assertEqual(
+                scheduler.progress.snapshot()["pending"]["kind"], "adventure"
+            )
 
     def test_empty_biscuit_inventory_blocks_tasks_without_feeding(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
