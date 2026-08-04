@@ -35,8 +35,8 @@
   },
   "care": {
     "enabled": true,
-    "hunger_threshold": 35,
-    "clean_threshold": 35,
+    "hunger_threshold": 80,
+    "clean_threshold": 80,
     "auto_buy_supplies": true,
     "food_purchase_count": 10,
     "soap_purchase_count": 10,

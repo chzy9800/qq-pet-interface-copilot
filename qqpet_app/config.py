@@ -39,8 +39,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "care": {
         "enabled": True,
-        "hunger_threshold": 35,
-        "clean_threshold": 35,
+        "hunger_threshold": 80,
+        "clean_threshold": 80,
         "auto_buy_supplies": True,
         "food_purchase_count": 10,
         "soap_purchase_count": 10,

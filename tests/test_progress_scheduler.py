@@ -142,6 +142,42 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertIsNotNone(scheduler.progress.active_care_block("feed"))
             self.assertIsNone(scheduler.progress.snapshot()["pending"])
 
+    def test_care_runs_while_story_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["care"]["hunger_threshold"] = 80
+            store.save(config)
+
+            class FakeClient:
+                fed = False
+
+                def query_values(self):
+                    return PetValues(gold=1000, hunger=90 if self.fed else 79, clean=100)
+
+                def query_story(self):
+                    return StoryStatus("6100_active", 2, remaining_seconds=600, duration_seconds=1800)
+
+                def query_food_inventory(self):
+                    from qqpet_app.client import FoodInventory
+
+                    return FoodInventory(biscuits=9 if self.fed else 10, shrimp=10)
+
+                def feed(self):
+                    self.fed = True
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "feed")
+            self.assertTrue(fake.fed)
+            self.assertEqual(scheduler.progress.count("feed"), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

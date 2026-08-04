@@ -248,9 +248,6 @@ class Scheduler:
             f"今日 {state['counts']}"
         )
 
-        if self._handle_story(client, config, story):
-            return "story"
-
         care = config["care"]
         if care["enabled"] and values.hunger < float(care["hunger_threshold"]):
             if self._care_blocked("feed"):
@@ -336,6 +333,12 @@ class Scheduler:
                     )
                     self.activity("洗澡未生效，等待重试")
             return "wash"
+
+        # Care actions are allowed while a school/work/adventure story is in
+        # progress.  Check them first so a long-running story cannot starve
+        # feeding or washing for its entire duration.
+        if self._handle_story(client, config, story):
+            return "story"
 
         action = self.decide(config, values)
         if not action:
