@@ -20,12 +20,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "interval_seconds": 15,
         "coin_threshold": 500,
     },
-    "school": {"enabled": True, "attribute": "physical"},
+    "school": {
+        "enabled": True,
+        "attribute": "physical",
+        "course_sub_event": 0,
+    },
     "work": {
         "enabled": True,
         "attribute": "culture",
+        "career_type": 0,
+        "job_sub_event": 0,
+        "strategy": "highest_total",
         "times_per_day": 0,
-        "prefer_highest_reward": True,
         "employ_friend": True,
     },
     "adventure": {
@@ -110,8 +116,16 @@ class ConfigStore:
             raise ValueError("account.pet_id 不能为空")
         if config["school"]["attribute"] not in {"culture", "physical", "art"}:
             raise ValueError("school.attribute 必须是 culture/physical/art")
+        if int(config["school"].get("course_sub_event", 0)) < 0:
+            raise ValueError("school.course_sub_event 不能小于 0")
         if config["work"]["attribute"] not in {"culture", "physical", "art"}:
             raise ValueError("work.attribute 必须是 culture/physical/art")
+        if int(config["work"].get("career_type", 0)) < 0:
+            raise ValueError("work.career_type 不能小于 0")
+        if int(config["work"].get("job_sub_event", 0)) < 0:
+            raise ValueError("work.job_sub_event 不能小于 0")
+        if config["work"].get("strategy", "highest_total") != "highest_total":
+            raise ValueError("work.strategy 目前仅支持 highest_total")
         if config["adventure"]["option"] not in {"encounter", "coins", "skill", "climate"}:
             raise ValueError("adventure.option 无效")
         hours, minutes = map(int, str(config["adventure"]["start_time"]).split(":"))

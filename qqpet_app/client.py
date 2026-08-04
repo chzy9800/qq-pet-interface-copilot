@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -140,6 +141,74 @@ class StoryStatus:
 
 
 @dataclass(frozen=True)
+class SchoolCourse:
+    name: str
+    sub_event_type: int
+    reward: str = ""
+    duration: str = ""
+    cost: str = ""
+    description: str = ""
+    can_do: bool = False
+
+    @property
+    def reward_value(self) -> int:
+        values = [int(value) for value in re.findall(r"\d+", self.reward)]
+        return max(values, default=0)
+
+
+@dataclass(frozen=True)
+class SchoolStartResult:
+    course: SchoolCourse
+    story_id: str = ""
+    response: OidbResponse | None = None
+
+
+@dataclass(frozen=True)
+class WorkCareer:
+    career_type: int
+    name: str
+    available: bool = False
+    status_code: int = 0
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class WorkOverview:
+    careers: tuple[WorkCareer, ...] = ()
+    current_career_type: int = 0
+    last_sub_event_type: int = 0
+
+
+@dataclass(frozen=True)
+class WorkJob:
+    career_type: int
+    career_name: str
+    name: str
+    sub_event_type: int
+    reward: str = ""
+    duration: str = ""
+    cost: str = ""
+    description: str = ""
+    can_do: bool = False
+
+    @property
+    def reward_value(self) -> int:
+        # The official client embeds an image URL before the actual reward.
+        # The URL contains large numeric identifiers, while the displayed
+        # amount is the final number in the string.
+        values = [int(value) for value in re.findall(r"\d+", self.reward)]
+        return values[-1] if values else 0
+
+
+@dataclass(frozen=True)
+class WorkStartResult:
+    job: WorkJob
+    story_id: str = ""
+    hired_friend: bool = False
+    response: OidbResponse | None = None
+
+
+@dataclass(frozen=True)
 class PageRules:
     trace: str = ""
     paths: tuple[tuple[int, int, int], ...] = ()
@@ -165,6 +234,12 @@ class NapCatClient:
     PAGE_RULES = ("OidbSvcTrpcTcp.0x96a4_1", 38564, 1)
     STORY_STATUS = ("OidbSvcTrpcTcp.0x975a_1", 38746, 1)
     STORY_SETTLE = ("OidbSvcTrpcTcp.0x9760_1", 38752, 1)
+    SCHOOL_OVERVIEW = ("OidbSvcTrpcTcp.0x9b60_1", 39776, 1)
+    SCHOOL_COURSES = ("OidbSvcTrpcTcp.0x9ab2_1", 39602, 1)
+    SCHOOL_START = ("OidbSvcTrpcTcp.0x975e_1", 38750, 1)
+    WORK_OVERVIEW = ("OidbSvcTrpcTcp.0x9b60_1", 39776, 1)
+    WORK_JOBS = ("OidbSvcTrpcTcp.0x9ab2_1", 39602, 1)
+    WORK_START = ("OidbSvcTrpcTcp.0x975e_1", 38750, 1)
 
     SCENES = {
         "school": {
@@ -414,7 +489,266 @@ class NapCatClient:
         except KeyError as exc:
             raise QQPetError(f"未知场景选项：{scene}.{option}") from exc
 
+    def query_school_stage(self) -> int:
+        body = (
+            field_varint(1, 6100)
+            + field_string(2, self.pet_id)
+            + field_varint(100, 2)
+        )
+        root = parse_message(self.send_oidb(*self.SCHOOL_OVERVIEW, body).body)
+        stage = first_varint(root, 4)
+        if stage not in {0, 1, 2, 3, 4}:
+            raise QQPetError(f"服务器返回未知学习阶段：{stage}")
+        return stage
+
+    def query_school_courses(self, stage: int | None = None) -> tuple[SchoolCourse, ...]:
+        stage = self.query_school_stage() if stage is None else int(stage)
+        body = (
+            field_varint(1, 6100)
+            + field_string(2, self.pet_id)
+            + field_string(3, "")
+            + field_varint(11, stage)
+            + field_varint(100, 2)
+        )
+        root = parse_message(self.send_oidb(*self.SCHOOL_COURSES, body).body)
+        courses: list[SchoolCourse] = []
+        for value in root.get(1, []):
+            if value.wire_type != 2:
+                continue
+            item = parse_message(bytes(value.value))
+            courses.append(
+                SchoolCourse(
+                    name=first_string(item, 1),
+                    sub_event_type=first_varint(item, 52),
+                    cost=first_string(item, 6),
+                    duration=first_string(item, 7),
+                    reward=first_string(item, 8),
+                    description=first_string(item, 14),
+                    can_do=bool(first_varint(item, 50)),
+                )
+            )
+        return tuple(courses)
+
+    def select_school_course(
+        self, attribute: str, preferred_sub_event: int = 0
+    ) -> SchoolCourse:
+        keyword = {"physical": "力量", "culture": "智力", "art": "魅力"}.get(attribute)
+        if not keyword:
+            raise QQPetError(f"未知学习属性：{attribute}")
+        courses = self.query_school_courses()
+        if preferred_sub_event:
+            selected = next(
+                (
+                    course
+                    for course in courses
+                    if course.can_do
+                    and course.sub_event_type == int(preferred_sub_event)
+                ),
+                None,
+            )
+            if selected is None:
+                raise QQPetError(
+                    f"指定课程 {preferred_sub_event} 不属于当前阶段或暂不可用"
+                )
+            return selected
+        candidates = [
+            course
+            for course in courses
+            if course.can_do
+            and course.sub_event_type > 0
+            and keyword in course.reward
+        ]
+        if not candidates:
+            raise QQPetError(f"当前学习阶段暂无可用的{keyword}课程")
+        return max(candidates, key=lambda course: (course.reward_value, course.sub_event_type))
+
+    def start_school(
+        self, attribute: str, preferred_sub_event: int = 0
+    ) -> SchoolStartResult:
+        course = self.select_school_course(attribute, preferred_sub_event)
+        body = (
+            field_varint(1, 6100)
+            + field_string(2, self.pet_id)
+            + field_string(3, "")
+            + field_string(6, course.name)
+            + field_varint(7, course.sub_event_type)
+            + field_varint(100, 2)
+        )
+        response = self.send_oidb(*self.SCHOOL_START, body)
+        story_id = first_string(parse_message(response.body), 1)
+        return SchoolStartResult(course=course, story_id=story_id, response=response)
+
+    def query_work_overview(self) -> WorkOverview:
+        body = (
+            field_varint(1, 6400)
+            + field_string(2, self.pet_id)
+            + field_varint(100, 2)
+        )
+        root = parse_message(self.send_oidb(*self.WORK_OVERVIEW, body).body)
+        careers: list[WorkCareer] = []
+        for value in root.get(1, []):
+            if value.wire_type != 2:
+                continue
+            item = parse_message(bytes(value.value))
+            career_type = first_varint(item, 20)
+            if career_type <= 0:
+                continue
+            status_code = first_varint(item, 4)
+            name = first_string(item, 1)
+            careers.append(
+                WorkCareer(
+                    career_type=career_type,
+                    name=name,
+                    available=status_code != 3 and name != "???",
+                    status_code=status_code,
+                    message=first_string(item, 5),
+                )
+            )
+        return WorkOverview(
+            careers=tuple(careers),
+            current_career_type=first_varint(root, 3),
+            last_sub_event_type=first_varint(root, 5),
+        )
+
+    def query_work_jobs(
+        self, career_type: int, hired_pet_id: str = ""
+    ) -> tuple[WorkJob, ...]:
+        career_type = int(career_type)
+        if career_type <= 0:
+            raise QQPetError("职业类型必须大于 0")
+        body = (
+            field_varint(1, 6400)
+            + field_string(2, self.pet_id)
+            + field_string(3, hired_pet_id)
+            + field_varint(10, career_type)
+            + field_varint(100, 2)
+        )
+        root = parse_message(self.send_oidb(*self.WORK_JOBS, body).body)
+        career_name = first_string(root, 2)
+        jobs: list[WorkJob] = []
+        for value in root.get(1, []):
+            if value.wire_type != 2:
+                continue
+            item = parse_message(bytes(value.value))
+            jobs.append(
+                WorkJob(
+                    career_type=career_type,
+                    career_name=career_name,
+                    name=first_string(item, 1),
+                    sub_event_type=first_varint(item, 52),
+                    cost=first_string(item, 6),
+                    duration=first_string(item, 7),
+                    reward=first_string(item, 8),
+                    description=first_string(item, 14),
+                    can_do=bool(first_varint(item, 50)),
+                )
+            )
+        return tuple(jobs)
+
+    def select_work_job(
+        self,
+        career_type: int = 0,
+        preferred_sub_event: int = 0,
+        strategy: str = "highest_total",
+        hired_pet_id: str = "",
+    ) -> WorkJob:
+        if strategy != "highest_total":
+            raise QQPetError(f"未知岗位选择策略：{strategy}")
+        overview = self.query_work_overview()
+        available = [career for career in overview.careers if career.available]
+        if career_type:
+            available = [
+                career for career in available if career.career_type == int(career_type)
+            ]
+            if not available:
+                raise QQPetError(f"职业 {career_type} 尚未开放")
+        if not available:
+            raise QQPetError("服务器当前没有开放的职业")
+
+        jobs = [
+            job
+            for career in available
+            for job in self.query_work_jobs(career.career_type, hired_pet_id)
+            if job.can_do and job.sub_event_type > 0
+        ]
+        if preferred_sub_event:
+            selected = next(
+                (
+                    job
+                    for job in jobs
+                    if job.sub_event_type == int(preferred_sub_event)
+                ),
+                None,
+            )
+            if selected is None:
+                raise QQPetError(
+                    f"指定岗位 {preferred_sub_event} 不属于开放职业或暂不可用"
+                )
+            return selected
+        if not jobs:
+            raise QQPetError("服务器当前没有可执行的打工岗位")
+
+        # On equal total reward, keep the current career when possible.  The
+        # final key is deterministic so automatic runs do not jump careers.
+        return max(
+            jobs,
+            key=lambda job: (
+                job.reward_value,
+                job.career_type == overview.current_career_type,
+                -job.career_type,
+                job.sub_event_type,
+            ),
+        )
+
+    def start_work(
+        self,
+        career_type: int = 0,
+        preferred_sub_event: int = 0,
+        strategy: str = "highest_total",
+        hired_user_id: str = "",
+        hired_pet_id: str = "",
+    ) -> WorkStartResult:
+        if bool(hired_user_id) != bool(hired_pet_id):
+            raise QQPetError("雇佣好友时必须同时提供好友账号和宠物 ID")
+        job = self.select_work_job(
+            career_type,
+            preferred_sub_event,
+            strategy,
+            hired_pet_id,
+        )
+        body = (
+            field_varint(1, 6400)
+            + field_string(2, self.pet_id)
+            + field_string(3, "")
+        )
+        if hired_user_id and hired_pet_id:
+            friend = field_string(1, hired_user_id) + field_string(2, hired_pet_id)
+            body += field_bytes(4, friend)
+        body += (
+            field_string(6, job.name)
+            + field_varint(7, job.sub_event_type)
+            + field_varint(100, 2)
+        )
+        response = self.send_oidb(*self.WORK_START, body)
+        story_id = first_string(parse_message(response.body), 1)
+        return WorkStartResult(
+            job=job,
+            story_id=story_id,
+            hired_friend=bool(hired_user_id and hired_pet_id),
+            response=response,
+        )
+
     def start_scene(self, scene: str, option: str, rules: PageRules | None = None) -> OidbResponse:
+        if scene == "school":
+            result = self.start_school(option)
+            if result.response is None:  # pragma: no cover - dataclass invariant
+                raise QQPetError("开课接口未返回响应")
+            return result.response
+        if scene == "work":
+            result = self.start_work()
+            if result.response is None:  # pragma: no cover - dataclass invariant
+                raise QQPetError("开工接口未返回响应")
+            return result.response
         page, event_type, sub_event = self.scene_path(scene, option)
         if rules is not None and not rules.allows((page, event_type, sub_event)):
             raise QQPetError(f"服务器当前未开放场景选项：{scene}.{option}")

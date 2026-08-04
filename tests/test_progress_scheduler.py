@@ -6,7 +6,15 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from qqpet_app.client import PageRules, PetValues, StoryStatus
+from qqpet_app.client import (
+    PageRules,
+    PetValues,
+    SchoolCourse,
+    SchoolStartResult,
+    StoryStatus,
+    WorkJob,
+    WorkStartResult,
+)
 from qqpet_app.config import ConfigStore
 from qqpet_app.progress import DailyProgress
 from qqpet_app.scheduler import Scheduler
@@ -92,14 +100,13 @@ class ProgressAndSchedulerTests(unittest.TestCase):
 
                     return FoodInventory(biscuits=12, shrimp=10)
 
-                def query_page_rules(self, _page):
-                    return PageRules(paths=((6000, 6100, 6201),), declared_count=1)
-
-                def scene_path(self, scene, option):
-                    return {("school", "physical"): (6000, 6100, 6201)}[(scene, option)]
-
-                def start_scene(self, scene, option, _rules):
-                    self.started = (scene, option)
+                def start_school(self, option, preferred_sub_event=0):
+                    self.started = ("school", option)
+                    self.assert_preferred = preferred_sub_event
+                    return SchoolStartResult(
+                        SchoolCourse("田径运动课", 6115004, "力量+25", "30分钟", can_do=True),
+                        "6100_created",
+                    )
 
             fake = FakeClient()
             scheduler = Scheduler(
@@ -110,6 +117,56 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(scheduler.run_once(), "school")
             self.assertEqual(fake.started, ("school", "physical"))
             self.assertEqual(scheduler.progress.snapshot()["pending"]["kind"], "school")
+
+    def test_run_once_starts_work_through_real_career_interface(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["scheduler"]["coin_threshold"] = 500
+            config["adventure"]["enabled"] = False
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            store.save(config)
+
+            class FakeClient:
+                started = None
+
+                def query_values(self):
+                    return PetValues(gold=1, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    from qqpet_app.client import FoodInventory
+
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+                def start_work(self, career_type, preferred_sub_event, strategy):
+                    self.started = (career_type, preferred_sub_event, strategy)
+                    return WorkStartResult(
+                        WorkJob(
+                            1,
+                            "涂鸦小徒",
+                            "熬夜赶参赛稿",
+                            6411004,
+                            "金币 539",
+                            "4小时",
+                            can_do=True,
+                        ),
+                        "6400_created",
+                    )
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "work")
+            self.assertEqual(fake.started, (0, 0, "highest_total"))
+            self.assertEqual(scheduler.progress.snapshot()["pending"]["kind"], "work")
 
     def test_empty_biscuit_inventory_blocks_tasks_without_feeding(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

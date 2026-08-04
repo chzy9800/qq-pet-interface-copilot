@@ -346,6 +346,42 @@ class Scheduler:
         action_name = self._action_name(action)
         self.activity(f"正在准备{action_name}")
         option = config[action].get("attribute") or config[action].get("option")
+        if action == "school":
+            self.activity("正在获取当前阶段课程")
+            preferred_course = int(config["school"].get("course_sub_event", 0))
+            result = client.start_school(option, preferred_course)
+            self.progress.set_pending("school")
+            course = result.course
+            response_story = f"，storyId={result.story_id}" if result.story_id else ""
+            selection = "指定" if preferred_course else "当前阶段最高收益"
+            self.log(
+                f"已选择{selection}的{course.reward}课程“{course.name}”"
+                f"（{course.duration}），真实开课指令已发送{response_story}；"
+                "等待状态接口确认倒计时"
+            )
+            self.activity(f"已开课：{course.name}，等待倒计时确认")
+            return action
+        if action == "work":
+            self.activity("正在获取开放职业和岗位")
+            career_type = int(config["work"].get("career_type", 0))
+            preferred_job = int(config["work"].get("job_sub_event", 0))
+            strategy = config["work"].get("strategy", "highest_total")
+            result = client.start_work(career_type, preferred_job, strategy)
+            self.progress.set_pending("work")
+            job = result.job
+            response_story = f"，storyId={result.story_id}" if result.story_id else ""
+            selection = "指定" if preferred_job else "总收益最高"
+            friend_text = "，已雇佣好友" if result.hired_friend else ""
+            self.log(
+                f"已选择{selection}岗位“{job.name}”"
+                f"（{job.career_name}，{job.duration}，收益 {job.reward}），"
+                f"真实开工指令已发送{response_story}{friend_text}；"
+                "等待状态接口确认倒计时"
+            )
+            if config["work"].get("employ_friend") and not result.hired_friend:
+                self.log("好友雇佣列表未返回可用对象，本次按正式协议无好友开工")
+            self.activity(f"已开工：{job.name}，等待倒计时确认")
+            return action
         rules = client.query_page_rules(6000)
         path = client.scene_path(action, option)
         if not rules.allows(path):

@@ -9,6 +9,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any
 
+from qqpet_app.client import NapCatClient
 from qqpet_app.config import ConfigStore
 from qqpet_app.scheduler import Scheduler
 
@@ -29,10 +30,8 @@ SETTING_FIELDS = [
     ("school.enabled", "启用学习", bool),
     ("school.attribute", "学习属性 culture/physical/art", str),
     ("work.enabled", "启用打工", bool),
-    ("work.attribute", "打工属性 culture/physical/art", str),
     ("work.times_per_day", "每日打工上限（0 不限）", int),
-    ("work.prefer_highest_reward", "最高收益偏好（接口字段待确认）", bool),
-    ("work.employ_friend", "雇佣好友偏好（接口字段待确认）", bool),
+    ("work.employ_friend", "有可用好友时优先雇佣", bool),
     ("adventure.enabled", "启用冒险", bool),
     ("adventure.option", "冒险类型 encounter/coins/skill/climate", str),
     ("adventure.start_time", "冒险开始时间 HH:MM", str),
@@ -76,12 +75,20 @@ class MainWindow(tk.Tk):
         self.scheduler: Scheduler | None = None
         self.scheduler_thread: threading.Thread | None = None
         self.setting_vars: dict[str, tuple[tk.Variable, type]] = {}
+        self.course_var = tk.StringVar(value="自动选择当前属性最高收益")
+        self.course_options: dict[str, int] = {"自动选择当前属性最高收益": 0}
+        self.job_var = tk.StringVar(value="自动选择开放职业中总收益最高岗位")
+        self.job_options: dict[str, tuple[int, int]] = {
+            "自动选择开放职业中总收益最高岗位": (0, 0)
+        }
         self.status_vars = {
             key: tk.StringVar(value="--")
             for key in ("connection", "gold", "food", "mood", "hunger", "clean", "total", "story", "counts")
         }
         self._build_ui()
         self._load_settings()
+        self.after(500, self._refresh_school_courses)
+        self.after(700, self._refresh_work_jobs)
         self.after(100, self._drain_events)
         if auto_start:
             self.after(250, self._start)
@@ -121,7 +128,7 @@ class MainWindow(tk.Tk):
         note = (
             "接口版不需要 scrcpy、OCR 或手机坐标。\n"
             "食物库存来自服务器：饼干/虾仁；洗澡会核对清洁值。\n"
-            "金币兑换的写接口仍须抓到真实命令后才会启用。"
+            "学习和打工选项均从服务器实时读取，不使用固定坐标。"
         )
         ttk.Label(left, text=note, foreground="#666", justify=tk.LEFT).pack(anchor="w", pady=(18, 0))
 
@@ -156,9 +163,59 @@ class MainWindow(tk.Tk):
                 variable = tk.StringVar()
                 ttk.Entry(form, textvariable=variable, width=46).grid(row=row, column=1, sticky="ew", padx=6, pady=5)
             self.setting_vars[path] = (variable, value_type)
+        course_row = len(SETTING_FIELDS)
+        ttk.Label(form, text="当前阶段课程").grid(
+            row=course_row, column=0, sticky="w", padx=6, pady=5
+        )
+        course_box = ttk.Frame(form)
+        course_box.grid(row=course_row, column=1, sticky="ew", padx=6, pady=5)
+        self.course_combo = ttk.Combobox(
+            course_box,
+            textvariable=self.course_var,
+            state="readonly",
+            width=41,
+            values=tuple(self.course_options),
+        )
+        self.course_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.course_refresh_button = ttk.Button(
+            course_box,
+            text="刷新",
+            command=self._refresh_school_courses,
+        )
+        self.course_refresh_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.course_stage_label = ttk.Label(form, text="将从服务器读取当前学园阶段", foreground="#666")
+        self.course_stage_label.grid(
+            row=course_row + 1, column=1, sticky="w", padx=6, pady=(0, 5)
+        )
+        job_row = course_row + 2
+        ttk.Label(form, text="开放职业岗位").grid(
+            row=job_row, column=0, sticky="w", padx=6, pady=5
+        )
+        job_box = ttk.Frame(form)
+        job_box.grid(row=job_row, column=1, sticky="ew", padx=6, pady=5)
+        self.job_combo = ttk.Combobox(
+            job_box,
+            textvariable=self.job_var,
+            state="readonly",
+            width=41,
+            values=tuple(self.job_options),
+        )
+        self.job_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.job_refresh_button = ttk.Button(
+            job_box,
+            text="刷新",
+            command=self._refresh_work_jobs,
+        )
+        self.job_refresh_button.pack(side=tk.LEFT, padx=(6, 0))
+        self.job_status_label = ttk.Label(
+            form, text="将从服务器读取已开放职业和岗位", foreground="#666"
+        )
+        self.job_status_label.grid(
+            row=job_row + 1, column=1, sticky="w", padx=6, pady=(0, 5)
+        )
         form.columnconfigure(1, weight=1)
         ttk.Button(form, text="保存并立即生效", command=self._save_settings).grid(
-            row=len(SETTING_FIELDS), column=0, columnspan=2, sticky="ew", padx=6, pady=14
+            row=job_row + 2, column=0, columnspan=2, sticky="ew", padx=6, pady=14
         )
 
     def _status_row(self, parent: ttk.Frame, title: str, key: str, small: bool = False) -> None:
@@ -172,6 +229,70 @@ class MainWindow(tk.Tk):
         config = self.config_store.data
         for path, (variable, _value_type) in self.setting_vars.items():
             variable.set(deep_get(config, path))
+        selected = int(config["school"].get("course_sub_event", 0))
+        if selected:
+            label = f"已保存课程编号 {selected}（刷新后显示名称）"
+            self.course_options[label] = selected
+            self.course_combo.configure(values=tuple(self.course_options))
+            self.course_var.set(label)
+        else:
+            self.course_var.set("自动选择当前属性最高收益")
+        career_type = int(config["work"].get("career_type", 0))
+        job_sub_event = int(config["work"].get("job_sub_event", 0))
+        if job_sub_event:
+            label = f"已保存岗位编号 {job_sub_event}（刷新后显示名称）"
+            self.job_options[label] = (career_type, job_sub_event)
+            self.job_combo.configure(values=tuple(self.job_options))
+            self.job_var.set(label)
+        else:
+            self.job_var.set("自动选择开放职业中总收益最高岗位")
+
+    def _refresh_school_courses(self) -> None:
+        self.course_refresh_button.configure(state=tk.DISABLED)
+        self.course_stage_label.configure(text="正在读取服务器课程目录…")
+
+        def worker() -> None:
+            try:
+                config = self.config_store.data
+                client = NapCatClient(
+                    config["napcat"]["url"],
+                    config["napcat"]["token"],
+                    config["account"]["pet_id"],
+                    float(config["napcat"]["timeout_seconds"]),
+                )
+                stage = client.query_school_stage()
+                courses = client.query_school_courses(stage)
+                self.events.put(("school_courses", (stage, courses)))
+            except Exception as exc:
+                self.events.put(("school_courses_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _refresh_work_jobs(self) -> None:
+        self.job_refresh_button.configure(state=tk.DISABLED)
+        self.job_status_label.configure(text="正在读取服务器职业和岗位目录…")
+
+        def worker() -> None:
+            try:
+                config = self.config_store.data
+                client = NapCatClient(
+                    config["napcat"]["url"],
+                    config["napcat"]["token"],
+                    config["account"]["pet_id"],
+                    float(config["napcat"]["timeout_seconds"]),
+                )
+                overview = client.query_work_overview()
+                jobs = tuple(
+                    job
+                    for career in overview.careers
+                    if career.available
+                    for job in client.query_work_jobs(career.career_type)
+                )
+                self.events.put(("work_jobs", (overview, jobs)))
+            except Exception as exc:
+                self.events.put(("work_jobs_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _save_settings(self) -> None:
         config = self.config_store.data
@@ -180,6 +301,17 @@ class MainWindow(tk.Tk):
                 raw = variable.get()
                 value = raw if value_type is bool else value_type(raw)
                 deep_set(config, path, value)
+            selected_label = self.course_var.get()
+            if selected_label not in self.course_options:
+                raise ValueError("请刷新并重新选择课程")
+            config["school"]["course_sub_event"] = self.course_options[selected_label]
+            selected_job = self.job_var.get()
+            if selected_job not in self.job_options:
+                raise ValueError("请刷新并重新选择打工岗位")
+            career_type, job_sub_event = self.job_options[selected_job]
+            config["work"]["career_type"] = career_type
+            config["work"]["job_sub_event"] = job_sub_event
+            config["work"]["strategy"] = "highest_total"
             self.config_store.save(config)
         except Exception as exc:
             messagebox.showerror("设置无效", str(exc), parent=self)
@@ -247,6 +379,61 @@ class MainWindow(tk.Tk):
                     self.status_vars["connection"].set(str(payload))
                 elif kind == "activity":
                     self.status_vars["story"].set(str(payload))
+                elif kind == "school_courses":
+                    stage, courses = payload
+                    previous = int(self.config_store.data["school"].get("course_sub_event", 0))
+                    options = {"自动选择当前属性最高收益": 0}
+                    selected_label = "自动选择当前属性最高收益"
+                    for course in courses:
+                        label = f"{course.name}｜{course.duration}｜{course.reward}"
+                        options[label] = course.sub_event_type
+                        if course.sub_event_type == previous:
+                            selected_label = label
+                    self.course_options = options
+                    self.course_combo.configure(values=tuple(options))
+                    self.course_var.set(selected_label)
+                    stage_name = {
+                        0: "学前辅导",
+                        1: "初级学园",
+                        2: "中级学园",
+                        3: "高级学园",
+                        4: "进修学院",
+                    }.get(stage, f"阶段 {stage}")
+                    self.course_stage_label.configure(
+                        text=f"服务器当前阶段：{stage_name}；共 {len(courses)} 门课程"
+                    )
+                    self.course_refresh_button.configure(state=tk.NORMAL)
+                elif kind == "school_courses_error":
+                    self.course_stage_label.configure(text=f"课程读取失败：{payload}")
+                    self.course_refresh_button.configure(state=tk.NORMAL)
+                elif kind == "work_jobs":
+                    overview, jobs = payload
+                    config = self.config_store.data
+                    previous = int(config["work"].get("job_sub_event", 0))
+                    automatic = "自动选择开放职业中总收益最高岗位"
+                    options = {automatic: (0, 0)}
+                    selected_label = automatic
+                    for job in jobs:
+                        if not job.can_do:
+                            continue
+                        label = (
+                            f"{job.career_name}｜{job.name}｜"
+                            f"{job.duration}｜收益 {job.reward}"
+                        )
+                        options[label] = (job.career_type, job.sub_event_type)
+                        if job.sub_event_type == previous:
+                            selected_label = label
+                    self.job_options = options
+                    self.job_combo.configure(values=tuple(options))
+                    self.job_var.set(selected_label)
+                    open_count = sum(1 for career in overview.careers if career.available)
+                    self.job_status_label.configure(
+                        text=f"服务器开放 {open_count} 个职业；共 {len(jobs)} 个岗位"
+                    )
+                    self.job_refresh_button.configure(state=tk.NORMAL)
+                elif kind == "work_jobs_error":
+                    self.job_status_label.configure(text=f"岗位读取失败：{payload}")
+                    self.job_refresh_button.configure(state=tk.NORMAL)
         except queue.Empty:
             pass
         self.after(100, self._drain_events)

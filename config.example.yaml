@@ -14,13 +14,16 @@
   },
   "school": {
     "enabled": true,
-    "attribute": "physical"
+    "attribute": "physical",
+    "course_sub_event": 0
   },
   "work": {
     "enabled": true,
     "attribute": "culture",
+    "career_type": 0,
+    "job_sub_event": 0,
+    "strategy": "highest_total",
     "times_per_day": 0,
-    "prefer_highest_reward": true,
     "employ_friend": true
   },
   "adventure": {

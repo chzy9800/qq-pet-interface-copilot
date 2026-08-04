@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import unittest
 
-from qqpet_app.client import NapCatClient, PageRules, QQPetError, StoryStatus
+from qqpet_app.client import (
+    NapCatClient,
+    PageRules,
+    QQPetError,
+    SchoolCourse,
+    StoryStatus,
+    WorkJob,
+)
 from qqpet_app.proto import (
     field_bytes,
     field_fixed32,
@@ -97,10 +104,165 @@ class ProtoAndClientTests(unittest.TestCase):
         self.assertTrue(rules.allows((6000, 6400, 6501)))
         self.assertFalse(rules.allows((6000, 6100, 6101)))
 
-    def test_scene_start_rejects_path_not_offered_by_server(self) -> None:
+    def test_rule_based_scene_rejects_path_not_offered_by_server(self) -> None:
         client = NapCatClient("http://unused", "token", "pet", transport=lambda *_: {})
         with self.assertRaises(QQPetError):
-            client.start_scene("school", "culture", PageRules(paths=((6000, 6400, 6401),)))
+            client.start_scene(
+                "adventure",
+                "coins",
+                PageRules(paths=((6000, 6500, 6501),)),
+            )
+
+    def test_school_start_uses_live_stage_and_highest_attribute_reward(self) -> None:
+        calls = 0
+        short_course = (
+            field_string(1, "体能课")
+            + field_string(7, "10分钟")
+            + field_string(8, "力量+10")
+            + field_varint(50, 1)
+            + field_varint(52, 6115001)
+        )
+        best_course = (
+            field_string(1, "田径运动课")
+            + field_string(6, "金币72，体力15")
+            + field_string(7, "30分钟")
+            + field_string(8, "力量+25")
+            + field_varint(50, 1)
+            + field_varint(52, 6115004)
+        )
+
+        def transport(command: str, data: str) -> dict:
+            nonlocal calls
+            calls += 1
+            outer = parse_message(bytes.fromhex(data))
+            request = parse_message(first_bytes(outer, 4))
+            if calls == 1:
+                self.assertEqual(command, "OidbSvcTrpcTcp.0x9b60_1")
+                self.assertEqual(first_varint(request, 1), 6100)
+                self.assertEqual(first_string(request, 2), "pet")
+                self.assertEqual(first_varint(request, 100), 2)
+                return oidb_response(39776, 1, field_varint(4, 1))
+            if calls == 2:
+                self.assertEqual(command, "OidbSvcTrpcTcp.0x9ab2_1")
+                self.assertEqual(first_varint(request, 11), 1)
+                return oidb_response(
+                    39602,
+                    1,
+                    field_bytes(1, short_course) + field_bytes(1, best_course),
+                )
+            self.assertEqual(command, "OidbSvcTrpcTcp.0x975e_1")
+            self.assertEqual(first_varint(request, 1), 6100)
+            self.assertEqual(first_string(request, 2), "pet")
+            self.assertEqual(first_string(request, 3), "")
+            self.assertEqual(first_string(request, 6), "田径运动课")
+            self.assertEqual(first_varint(request, 7), 6115004)
+            self.assertEqual(first_varint(request, 100), 2)
+            return oidb_response(38750, 1, field_string(1, "6100_created"))
+
+        client = NapCatClient("http://unused", "token", "pet", transport=transport)
+        result = client.start_school("physical")
+        self.assertEqual(result.course.name, "田径运动课")
+        self.assertEqual(result.story_id, "6100_created")
+
+    def test_school_course_can_be_selected_by_frontend_id(self) -> None:
+        client = NapCatClient("http://unused", "token", "pet", transport=lambda *_: {})
+        courses = (
+            SchoolCourse("看图识世界课", 6115002, "智力+10", "10分钟", can_do=True),
+            SchoolCourse("世界地理课", 6115005, "智力+25", "30分钟", can_do=True),
+        )
+        client.query_school_courses = lambda _stage=None: courses
+        selected = client.select_school_course("culture", 6115002)
+        self.assertEqual(selected.name, "看图识世界课")
+
+    def test_work_start_uses_live_career_jobs_and_real_begin_packet(self) -> None:
+        calls = 0
+        career = (
+            field_string(1, "彩虹画室")
+            + field_varint(4, 1)
+            + field_varint(20, 1)
+        )
+        short_job = (
+            field_string(1, "帮店主补招牌")
+            + field_string(7, "10分钟")
+            + field_string(8, "金币 65")
+            + field_varint(50, 1)
+            + field_varint(52, 6411001)
+        )
+        best_job = (
+            field_string(1, "熬夜赶参赛稿")
+            + field_string(6, "体力40，清洁16")
+            + field_string(7, "4小时")
+            + field_string(8, "![金币](https://example/123456.png) 539")
+            + field_varint(50, 1)
+            + field_varint(52, 6411004)
+        )
+
+        def transport(command: str, data: str) -> dict:
+            nonlocal calls
+            calls += 1
+            outer = parse_message(bytes.fromhex(data))
+            request = parse_message(first_bytes(outer, 4))
+            if calls == 1:
+                self.assertEqual(command, "OidbSvcTrpcTcp.0x9b60_1")
+                self.assertEqual(first_varint(request, 1), 6400)
+                self.assertEqual(first_string(request, 2), "pet")
+                self.assertEqual(first_varint(request, 100), 2)
+                return oidb_response(
+                    39776,
+                    1,
+                    field_bytes(1, career)
+                    + field_varint(3, 1)
+                    + field_varint(5, 6411001),
+                )
+            if calls == 2:
+                self.assertEqual(command, "OidbSvcTrpcTcp.0x9ab2_1")
+                self.assertEqual(first_varint(request, 1), 6400)
+                self.assertEqual(first_varint(request, 10), 1)
+                return oidb_response(
+                    39602,
+                    1,
+                    field_bytes(1, short_job)
+                    + field_bytes(1, best_job)
+                    + field_string(2, "涂鸦小徒"),
+                )
+            self.assertEqual(command, "OidbSvcTrpcTcp.0x975e_1")
+            self.assertEqual(first_varint(request, 1), 6400)
+            self.assertEqual(first_string(request, 2), "pet")
+            self.assertEqual(first_string(request, 3), "")
+            self.assertEqual(first_string(request, 6), "熬夜赶参赛稿")
+            self.assertEqual(first_varint(request, 7), 6411004)
+            self.assertEqual(first_varint(request, 100), 2)
+            return oidb_response(38750, 1, field_string(1, "6400_created"))
+
+        client = NapCatClient("http://unused", "token", "pet", transport=transport)
+        result = client.start_work(career_type=1)
+        self.assertEqual(result.job.name, "熬夜赶参赛稿")
+        self.assertEqual(result.job.reward_value, 539)
+        self.assertEqual(result.story_id, "6400_created")
+
+    def test_work_start_encodes_hired_friend_as_nested_user_info(self) -> None:
+        def transport(command: str, data: str) -> dict:
+            self.assertEqual(command, "OidbSvcTrpcTcp.0x975e_1")
+            outer = parse_message(bytes.fromhex(data))
+            request = parse_message(first_bytes(outer, 4))
+            friend = parse_message(first_bytes(request, 4))
+            self.assertEqual(first_string(friend, 1), "friend-user")
+            self.assertEqual(first_string(friend, 2), "friend-pet")
+            return oidb_response(38750, 1, field_string(1, "6400_friend"))
+
+        client = NapCatClient("http://unused", "token", "pet", transport=transport)
+        client.select_work_job = lambda *_args: WorkJob(
+            1,
+            "涂鸦小徒",
+            "熬夜赶参赛稿",
+            6411004,
+            "金币 539",
+            "4小时",
+            can_do=True,
+        )
+        result = client.start_work(hired_user_id="friend-user", hired_pet_id="friend-pet")
+        self.assertTrue(result.hired_friend)
+        self.assertEqual(result.story_id, "6400_friend")
 
     def test_food_inventory_uses_empty_request_and_decodes_response(self) -> None:
         def transport(_command: str, data: str) -> dict:
