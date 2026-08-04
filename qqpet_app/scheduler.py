@@ -71,13 +71,6 @@ class Scheduler:
         if adventure["enabled"] and due and (adventure_limit == 0 or counts["adventure"] < adventure_limit):
             return "adventure"
 
-        points = (
-            counts["school"] * int(config["scheduler"]["school_factor"])
-            + counts["work"] * int(config["scheduler"]["work_factor"])
-        )
-        if points > int(config["scheduler"]["daily_point_limit"]):
-            return "work" if self._under_limit(config, counts, "work") else None
-
         if values.gold >= float(config["scheduler"]["coin_threshold"]):
             if self._under_limit(config, counts, "school"):
                 return "school"
@@ -88,6 +81,8 @@ class Scheduler:
     def _under_limit(config: dict, counts: dict, kind: str) -> bool:
         if not config[kind]["enabled"]:
             return False
+        if kind == "school":
+            return True
         limit = int(config[kind]["times_per_day"])
         return limit == 0 or counts[kind] < limit
 
@@ -355,11 +350,19 @@ class Scheduler:
         path = client.scene_path(action, option)
         if not rules.allows(path):
             count_text = "未知" if rules.declared_count is None else str(rules.declared_count)
-            self.log(
-                f"服务器当前未开放 {action}.{option}；"
-                f"户外规则数 {count_text}，本轮不发送启动请求"
-            )
-            self.activity(f"当前无可执行{action_name}路线，本轮跳过")
+            if action == "school":
+                self.log(
+                    f"{action}.{option} 已启用且不限次数；"
+                    f"当前接口尚未取得学校模块的开课指令（行为规则数 {count_text}），"
+                    "本轮不发送未经确认的启动请求"
+                )
+                self.activity("学习不限次数，正在等待开课接口补齐")
+            else:
+                self.log(
+                    f"服务器当前未开放 {action}.{option}；"
+                    f"户外规则数 {count_text}，本轮不发送启动请求"
+                )
+                self.activity(f"当前无可执行{action_name}路线，本轮跳过")
             return None
         self.activity(f"正在启动{action_name}")
         client.start_scene(action, option, rules)

@@ -25,7 +25,7 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(state["counts"]["school"], 0)
             self.assertEqual(state["history"][-1]["counts"]["school"], 2)
 
-    def test_dispatch_priority_and_point_limit(self) -> None:
+    def test_dispatch_priority_and_unlimited_school(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             store = ConfigStore(root / "config.yaml")
@@ -39,7 +39,9 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(scheduler.decide(config, rich, now), "school")
             self.assertEqual(scheduler.decide(config, poor, now), "work")
             scheduler.progress.increment("school", 11)
-            self.assertEqual(scheduler.decide(config, rich, now), "work")
+            self.assertEqual(scheduler.decide(config, rich, now), "school")
+            config["school"]["times_per_day"] = 1  # 兼容旧配置时也不能重新限制学习
+            self.assertEqual(scheduler.decide(config, rich, now), "school")
 
     def test_adventure_wins_after_configured_time(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

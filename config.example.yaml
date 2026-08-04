@@ -10,15 +10,11 @@
   },
   "scheduler": {
     "interval_seconds": 15,
-    "coin_threshold": 500,
-    "school_factor": 20,
-    "work_factor": 45,
-    "daily_point_limit": 200
+    "coin_threshold": 500
   },
   "school": {
     "enabled": true,
-    "attribute": "physical",
-    "times_per_day": 0
+    "attribute": "physical"
   },
   "work": {
     "enabled": true,

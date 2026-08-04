@@ -19,11 +19,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "scheduler": {
         "interval_seconds": 15,
         "coin_threshold": 500,
-        "school_factor": 20,
-        "work_factor": 45,
-        "daily_point_limit": 200,
     },
-    "school": {"enabled": True, "attribute": "physical", "times_per_day": 0},
+    "school": {"enabled": True, "attribute": "physical"},
     "work": {
         "enabled": True,
         "attribute": "culture",
@@ -122,7 +119,6 @@ class ConfigStore:
             raise ValueError("adventure.start_time 必须是 HH:MM")
         for section, key in (
             ("scheduler", "interval_seconds"),
-            ("scheduler", "daily_point_limit"),
             ("care", "hunger_threshold"),
             ("care", "clean_threshold"),
             ("care", "food_purchase_count"),
