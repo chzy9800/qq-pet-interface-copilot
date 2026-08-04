@@ -1,0 +1,56 @@
+{
+  "napcat": {
+    "url": "http://127.0.0.1:6201",
+    "token": "CHANGE_ME_LOCAL_TOKEN",
+    "timeout_seconds": 15
+  },
+  "account": {
+    "uin": "YOUR_QQ_UIN",
+    "pet_id": "YOUR_PET_ID"
+  },
+  "scheduler": {
+    "interval_seconds": 15,
+    "coin_threshold": 500,
+    "school_factor": 20,
+    "work_factor": 45,
+    "daily_point_limit": 200
+  },
+  "school": {
+    "enabled": true,
+    "attribute": "physical",
+    "times_per_day": 0
+  },
+  "work": {
+    "enabled": true,
+    "attribute": "culture",
+    "times_per_day": 0,
+    "prefer_highest_reward": true,
+    "employ_friend": true
+  },
+  "adventure": {
+    "enabled": true,
+    "option": "encounter",
+    "start_time": "20:00",
+    "times_per_day": 3
+  },
+  "care": {
+    "enabled": true,
+    "hunger_threshold": 35,
+    "clean_threshold": 35,
+    "auto_buy_supplies": true,
+    "food_purchase_count": 10,
+    "soap_purchase_count": 10,
+    "verify_delay_seconds": 1,
+    "failure_cooldown_seconds": 3600
+  },
+  "story": {
+    "recall_check_seconds": 15,
+    "start_confirm_seconds": 45,
+    "settle_retry_seconds": 60,
+    "auto_settle_when_end_time_reached": true
+  },
+  "safety": {
+    "safe_mode": true,
+    "allow_experimental_scene_actions": false
+  }
+}

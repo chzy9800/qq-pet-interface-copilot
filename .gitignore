@@ -1,0 +1,33 @@
+# Local identity and runtime state
+config.yaml
+runs/
+artifacts/
+analysis/
+backup.ab
+
+# Bundled reverse-engineering/runtime tools and third-party references
+tools/
+references/
+
+# Python and IDE files
+__pycache__/
+*.py[cod]
+.venv/
+.idea/
+.vscode/
+
+# Crash dumps, captures, packages and binaries
+*.log
+*.apk
+*.dex
+*.qqxlog
+*.mmap3
+*.zip
+*.xz
+*.exe
+*.dll
+hs_err_pid*
+
+# Private investigation notes
+docs/pc-napcat-probe.md
+

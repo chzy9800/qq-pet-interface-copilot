@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+import json
+from datetime import datetime
+from pathlib import Path
+
+from qqpet_app.client import PageRules, PetValues, StoryStatus
+from qqpet_app.config import ConfigStore
+from qqpet_app.progress import DailyProgress
+from qqpet_app.scheduler import Scheduler
+
+
+class ProgressAndSchedulerTests(unittest.TestCase):
+    def test_daily_rollover_archives_and_resets(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "progress.json"
+            path.write_text(
+                json.dumps({"date": "2000-01-01", "counts": {"school": 2}, "history": [], "pending": None}),
+                encoding="utf-8",
+            )
+            progress = DailyProgress(path)
+            state = progress.snapshot()
+            self.assertEqual(state["counts"]["school"], 0)
+            self.assertEqual(state["history"][-1]["counts"]["school"], 2)
+
+    def test_dispatch_priority_and_point_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["adventure"]["start_time"] = "23:59"
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            rich = PetValues(gold=1000)
+            poor = PetValues(gold=1)
+            now = datetime(2026, 8, 2, 12, 0)
+            self.assertEqual(scheduler.decide(config, rich, now), "school")
+            self.assertEqual(scheduler.decide(config, poor, now), "work")
+            scheduler.progress.increment("school", 11)
+            self.assertEqual(scheduler.decide(config, rich, now), "work")
+
+    def test_adventure_wins_after_configured_time(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["adventure"]["start_time"] = "08:00"
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            action = scheduler.decide(config, PetValues(gold=1000), datetime(2026, 8, 2, 9, 0))
+            self.assertEqual(action, "adventure")
+
+    def test_story_kind_can_recover_interrupted_work(self) -> None:
+        self.assertEqual(Scheduler._story_kind("6400_example"), "work")
+        self.assertEqual(Scheduler._story_kind("6100_example"), "school")
+        self.assertEqual(Scheduler._story_kind("6700_example"), "adventure")
+
+    def test_settled_story_id_is_persisted_and_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "progress.json"
+            progress = DailyProgress(path)
+            progress.mark_story_settled("6700_once")
+            progress.mark_story_settled("6700_once")
+            self.assertTrue(progress.story_was_settled("6700_once"))
+            self.assertEqual(progress.snapshot()["settled_story_ids"], ["6700_once"])
+
+    def test_run_once_starts_only_server_offered_scene(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["adventure"]["start_time"] = "23:59"
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            store.save(config)
+
+            class FakeClient:
+                started = None
+
+                def query_values(self):
+                    return PetValues(gold=1000, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    from qqpet_app.client import FoodInventory
+
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+                def query_page_rules(self, _page):
+                    return PageRules(paths=((6000, 6100, 6201),), declared_count=1)
+
+                def scene_path(self, scene, option):
+                    return {("school", "physical"): (6000, 6100, 6201)}[(scene, option)]
+
+                def start_scene(self, scene, option, _rules):
+                    self.started = (scene, option)
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "school")
+            self.assertEqual(fake.started, ("school", "physical"))
+            self.assertEqual(scheduler.progress.snapshot()["pending"]["kind"], "school")
+
+    def test_empty_biscuit_inventory_blocks_tasks_without_feeding(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["care"]["auto_buy_supplies"] = False
+            store.save(config)
+
+            class FakeClient:
+                def query_values(self):
+                    return PetValues(gold=1000, hunger=1, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    from qqpet_app.client import FoodInventory
+
+                    return FoodInventory(biscuits=0, shrimp=10)
+
+                def feed(self):
+                    raise AssertionError("饼干为零时不应发送当前喂食请求")
+
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: FakeClient(),
+            )
+            self.assertEqual(scheduler.run_once(), "feed_unavailable")
+            self.assertIsNotNone(scheduler.progress.active_care_block("feed"))
+            self.assertIsNone(scheduler.progress.snapshot()["pending"])
+
+
+if __name__ == "__main__":
+    unittest.main()

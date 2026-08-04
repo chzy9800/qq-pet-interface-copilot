@@ -1,0 +1,111 @@
+syntax = "proto3";
+
+package qqpet.recovered;
+
+// Android QQ 9.3.25 中恢复出的部分线格式。
+// 未知嵌套消息保留为 bytes；该文件用于记录/解析，不包含 QQ SSO 认证层。
+
+message GetUserPetRequest {
+  string pet_id = 1; // 无本地缓存时为空，因此线格式是空字节数组。
+  int32 platform = 99;
+}
+
+message GetUserPetResponse {
+  Pet pet = 1;
+}
+
+message Pet {
+  string resource_id = 1;
+  repeated bytes model_items = 2;
+  bytes model_info = 3;
+  bytes profile = 4;
+  bytes display_value = 5;
+  bytes extra_6 = 6;
+  bytes extra_7 = 7;
+  bytes extra_100 = 100;
+  string pet_id = 101;
+}
+
+message FeedingRequest {
+  string pet_master_uin = 1;
+  string nick = 2;
+  string avatar_url = 3;
+  string pet_id = 4;
+  int32 feed_type = 5;
+  bytes ext_info = 10;
+  bytes platform_ext = 99;
+}
+
+message FeedingResponse {
+  int32 result = 1;
+  bytes display_value = 2;
+  string message = 3;
+}
+
+// Sso_PetFeed_GetFeedTimesInfo / OidbSvcTrpcTcp.0x9949_1.
+// Names were verified against Android QQ 9.3.25's food exchange sheet.
+message FoodInventoryResponse {
+  int32 biscuits = 1;
+  int32 shrimp = 2;
+}
+
+message GetPetStoryStatusRequest {
+  string pet_id = 1;
+  int32 source = 2;
+  int32 outdoor_version = 100; // 当前 PetOutDoorVM 固定写入 2。
+}
+
+message DoAfterStoryInfoRequest {
+  string story_id = 1;
+  int32 action = 2; // QQ 9.3.25 当前调用固定为 1000。
+  string pet_id = 3;
+  int32 source = 4;
+  int32 outdoor_version = 100; // 当前 PetOutDoorVM 固定写入 2。
+}
+
+message ExecutePath {
+  int32 page = 1;
+  int32 event_type = 2;
+  int32 sub_event = 3;
+}
+
+message ReportEventRequest {
+  string pet_id = 1;
+  string friend_uin = 2;
+  ExecutePath execute_path = 3;
+  bytes execute_ext_info = 4;
+  bytes business_ext_info = 5;
+  map<string, string> params = 6;
+  bytes behavior_context = 90;
+  int32 platform = 99;
+}
+
+message ReportEventResponse {
+  repeated string execute_paths = 1;
+  bytes server_value_update = 2; // 电脑版实测出现；Android 9.3.25 的已知类会将其作为未知字段保留。
+}
+
+message GetPageRulesRequest {
+  string trace = 1;
+  string pet_id = 2;
+  int32 page = 3;
+  bytes execute_ext_info = 4;
+  int32 from = 10;
+  int32 platform = 99;
+}
+
+message PageEvent {
+  ExecutePath execute_path = 1;
+  int32 keep_count = 2;
+  map<string, bytes> rules = 8;
+  int32 extra = 10;
+}
+
+message GetPageRulesResponse {
+  string trace = 1;
+  repeated PageEvent events = 2;
+}
+
+message BathBusinessExt {
+  int32 clean_value = 5;
+}
