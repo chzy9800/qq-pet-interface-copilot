@@ -306,69 +306,17 @@ class ProtoAndClientTests(unittest.TestCase):
         )
         self.assertEqual(result.story_id, "6700_created")
 
-    def test_food_inventory_without_item_list_keeps_balances_unknown(self) -> None:
+    def test_food_inventory_uses_empty_request_and_decodes_response(self) -> None:
         def transport(_command: str, data: str) -> dict:
             request = parse_message(bytes.fromhex(data))
-            body = parse_message(first_bytes(request, 4))
-            self.assertIn(4, body)
-            self.assertEqual(first_string(body, 4), "")
+            self.assertEqual(first_bytes(request, 4), b"")
             return oidb_response(39241, 1, field_varint(1, 12) + field_varint(2, 10))
 
         client = NapCatClient("http://unused", "token", "pet", transport=transport)
         inventory = client.query_food_inventory()
-        self.assertIsNone(inventory.biscuits)
-        self.assertIsNone(inventory.shrimp)
-        self.assertEqual(inventory.allowance_remaining, 12)
-        self.assertEqual(inventory.allowance_max, 10)
-        self.assertEqual(inventory.raw_counter_2, 10)
-        self.assertEqual(inventory.total, 0)
-        self.assertEqual(inventory.biscuits_text, "未下发")
-        self.assertEqual(inventory.shrimp_text, "未下发")
-
-    def test_food_inventory_decodes_biscuit_and_shrimp_balances(self) -> None:
-        biscuit = (
-            field_varint(1, 9)
-            + field_varint(2, 99)
-            + field_string(3, "饼干")
-            + field_string(4, "food-biscuit")
-            + field_string(6, "9990032")
-        )
-        shrimp = (
-            field_varint(1, 15)
-            + field_varint(2, 99)
-            + field_string(3, "虾仁")
-            + field_string(4, "food-shrimp")
-            + field_string(6, "9990033")
-        )
-
-        def transport(_command: str, _data: str) -> dict:
-            body = (
-                field_varint(1, 9)
-                + field_varint(2, 10)
-                + field_bytes(4, biscuit)
-                + field_bytes(4, shrimp)
-            )
-            return oidb_response(39241, 1, body)
-
-        client = NapCatClient("http://unused", "token", "pet", transport=transport)
-        inventory = client.query_food_inventory()
-        self.assertEqual(inventory.biscuits, 9)
-        self.assertEqual(inventory.shrimp, 15)
-        self.assertEqual(inventory.shrimp_text, "15")
-        self.assertEqual(inventory.total, 24)
-        self.assertEqual(inventory.items[1].food_id, "food-shrimp")
-
-    def test_feed_can_select_food_id(self) -> None:
-        def transport(command: str, data: str) -> dict:
-            self.assertEqual(command, "OidbSvcTrpcTcp.0x992d_1")
-            request = parse_message(bytes.fromhex(data))
-            body = parse_message(first_bytes(request, 4))
-            self.assertEqual(first_string(body, 4), "pet")
-            self.assertEqual(first_string(body, 11), "food-shrimp")
-            return oidb_response(39213, 1, field_varint(1, 0))
-
-        client = NapCatClient("http://unused", "token", "pet", transport=transport)
-        client.feed("food-shrimp")
+        self.assertEqual(inventory.biscuits, 12)
+        self.assertEqual(inventory.shrimp, 10)
+        self.assertEqual(inventory.total, 22)
 
     def test_bath_shop_and_inventory_are_decoded(self) -> None:
         soap = (

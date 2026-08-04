@@ -9,9 +9,6 @@ from pathlib import Path
 from qqpet_app.client import (
     AdventureOption,
     AdventureStartResult,
-    BathInventory,
-    BathPurchaseResult,
-    FoodInventory,
     PageRules,
     PetValues,
     SchoolCourse,
@@ -26,89 +23,6 @@ from qqpet_app.scheduler import Scheduler
 
 
 class ProgressAndSchedulerTests(unittest.TestCase):
-    def test_wash_prefers_buying_and_using_bath_ball(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            store = ConfigStore(root / "config.yaml")
-            config = store.data
-            config["safety"]["safe_mode"] = False
-            config["care"]["clean_threshold"] = 80
-            config["care"]["verify_delay_seconds"] = 0
-            store.save(config)
-
-            class FakeClient:
-                bought = False
-                used_item = ""
-
-                def query_values(self):
-                    return PetValues(
-                        gold=1000,
-                        hunger=100,
-                        clean=100 if self.used_item else 79,
-                    )
-
-                def query_story(self):
-                    return StoryStatus(
-                        "6400_active", 51, remaining_seconds=100, duration_seconds=200
-                    )
-
-                def query_food_inventory(self):
-                    return FoodInventory(biscuits=10, shrimp=10)
-
-                def query_bath_inventory(self):
-                    ball_count = 9 if self.used_item == "2" else (10 if self.bought else 0)
-                    return BathInventory(counts=(("1", 5), ("2", ball_count)))
-
-                def buy_bath_item(self, item_id, count):
-                    self.assert_item = (item_id, count)
-                    self.bought = True
-                    return BathPurchaseResult(result=0, order_id="order")
-
-                def use_bath_item(self, item_id):
-                    self.used_item = item_id
-
-            fake = FakeClient()
-            scheduler = Scheduler(
-                root / "config.yaml",
-                root / "progress.json",
-                client_factory=lambda _config: fake,
-            )
-
-            self.assertEqual(scheduler.run_once(), "wash")
-            self.assertEqual(fake.assert_item, ("2", 10))
-            self.assertEqual(fake.used_item, "2")
-            self.assertEqual(scheduler.progress.count("wash"), 1)
-
-    def test_frontend_status_includes_bath_inventory(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            captured = []
-
-            class FakeClient:
-                def query_values(self):
-                    return PetValues(gold=1000, hunger=100, clean=100)
-
-                def query_story(self):
-                    return StoryStatus(
-                        "6400_active", 51, remaining_seconds=100, duration_seconds=200
-                    )
-
-                def query_food_inventory(self):
-                    return FoodInventory(biscuits=12, shrimp=10)
-
-                def query_bath_inventory(self):
-                    return BathInventory(counts=(("1", 3), ("2", 4)))
-
-            scheduler = Scheduler(
-                root / "config.yaml",
-                root / "progress.json",
-                client_factory=lambda _config: FakeClient(),
-                status_callback=lambda _values, _story, state: captured.append(state),
-            )
-
-            self.assertEqual(scheduler.run_once(), "story")
-            self.assertEqual(captured[0]["bath_inventory"], {"soap": 3, "bath_ball": 4})
-
     def test_daily_rollover_archives_and_resets(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "progress.json"

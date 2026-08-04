@@ -33,7 +33,6 @@ message FeedingRequest {
   string pet_id = 4;
   int32 feed_type = 5;
   bytes ext_info = 10;
-  string food_id = 11; // 新版多食物页面选择的具体食物。
   bytes platform_ext = 99;
 }
 
@@ -44,22 +43,10 @@ message FeedingResponse {
 }
 
 // Sso_PetFeed_GetFeedTimesInfo / OidbSvcTrpcTcp.0x9949_1.
-// Compared live with Android QQ 9.3.25's food exchange sheet.
+// Names were verified against Android QQ 9.3.25's food exchange sheet.
 message FoodInventoryResponse {
-  int32 allowance_remaining = 1;
-  int32 allowance_max = 2;
-  bytes selected_food = 3;
-  repeated FoodInventoryInfo inventory = 4;
-}
-
-message FoodInventoryInfo {
-  int32 balance = 1;
-  int32 balance_max = 2;
-  string food_name = 3;
-  string food_id = 4;
-  string tq_pic = 5;
-  string food_resource_id = 6;
-  string selected_pic = 7;
+  int32 biscuits = 1;
+  int32 shrimp = 2;
 }
 
 message GetPetStoryStatusRequest {
