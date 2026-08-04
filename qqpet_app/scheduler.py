@@ -297,39 +297,63 @@ class Scheduler:
                 return "wash_blocked"
             if not self._safe_or_blocked(config, "洗澡"):
                 bath_inventory = client.query_bath_inventory()
-                if bath_inventory.soap <= 0:
+                bath_item_id = "2" if bath_inventory.bath_ball > 0 else ""
+                bath_item_name = "沐浴球"
+                bath_item_count = bath_inventory.bath_ball
+                if not bath_item_id:
                     if not care["auto_buy_supplies"]:
-                        self.activity("缺少洗护用品，自动购买未开启")
-                        self._block_care(config, "wash", "香皂片不足，自动购买已关闭")
-                        return "wash_unavailable"
-                    self.activity("正在购买洗护用品")
-                    buy_count = int(care["soap_purchase_count"])
-                    purchase = client.buy_bath_item("1", buy_count)
-                    after_purchase = client.query_bath_inventory()
-                    if not purchase.succeeded and after_purchase.soap <= bath_inventory.soap:
-                        self._block_care(config, "wash", f"金币购买香皂片未成功（result={purchase.result}）")
-                        self.activity("购买洗护用品失败，等待重试")
-                        return "wash_unavailable"
-                    bath_inventory = after_purchase
-                    self.log(f"香皂片不足，已用金币购买 {buy_count} 个，当前香皂片 {bath_inventory.soap}")
-                self.activity("正在洗澡")
-                client.use_bath_item("1")
+                        if bath_inventory.soap <= 0:
+                            self.activity("缺少洗护用品，自动购买未开启")
+                            self._block_care(config, "wash", "沐浴球和香皂片均不足，自动购买已关闭")
+                            return "wash_unavailable"
+                        bath_item_id = "1"
+                        bath_item_name = "香皂片"
+                        bath_item_count = bath_inventory.soap
+                    else:
+                        self.activity("正在优先购买沐浴球")
+                        buy_count = int(care["soap_purchase_count"])
+                        purchase = client.buy_bath_item("2", buy_count)
+                        after_purchase = client.query_bath_inventory()
+                        if not purchase.succeeded and after_purchase.bath_ball <= bath_inventory.bath_ball:
+                            if bath_inventory.soap <= 0:
+                                self._block_care(
+                                    config,
+                                    "wash",
+                                    f"金币购买沐浴球未成功（result={purchase.result}）",
+                                )
+                                self.activity("购买洗护用品失败，等待重试")
+                                return "wash_unavailable"
+                            bath_item_id = "1"
+                            bath_item_name = "香皂片"
+                            bath_item_count = bath_inventory.soap
+                            self.log("沐浴球购买未到账，本轮回退使用已有香皂片")
+                        else:
+                            bath_inventory = after_purchase
+                            bath_item_id = "2"
+                            bath_item_count = bath_inventory.bath_ball
+                            self.log(
+                                f"已优先用金币购买 {buy_count} 个沐浴球，"
+                                f"当前沐浴球 {bath_inventory.bath_ball}"
+                            )
+                self.activity(f"正在使用{bath_item_name}洗澡")
+                client.use_bath_item(bath_item_id)
                 self._verify_delay(config)
                 after = client.query_values()
                 bath_after = client.query_bath_inventory()
-                if after.clean > values.clean or bath_after.soap < bath_inventory.soap:
+                remaining = bath_after.count(bath_item_id)
+                if after.clean > values.clean or remaining < bath_item_count:
                     self.progress.clear_care_block("wash")
                     self.progress.increment("wash")
                     self.log(
-                        f"清洁不足，已消耗香皂片洗澡并验证成功："
-                        f"{values.clean:.1f}→{after.clean:.1f}，剩余香皂片 {bath_after.soap}"
+                        f"清洁不足，已优先消耗{bath_item_name}洗澡并验证成功："
+                        f"{values.clean:.1f}→{after.clean:.1f}，剩余{bath_item_name} {remaining}"
                     )
                     self.activity("洗澡完成，等待下一轮")
                 else:
                     self._block_care(
                         config,
                         "wash",
-                        "洗澡响应成功但清洁值和香皂片库存均未变化",
+                        f"洗澡响应成功但清洁值和{bath_item_name}库存均未变化",
                     )
                     self.activity("洗澡未生效，等待重试")
             return "wash"
