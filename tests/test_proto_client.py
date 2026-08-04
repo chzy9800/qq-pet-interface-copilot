@@ -315,8 +315,9 @@ class ProtoAndClientTests(unittest.TestCase):
         client = NapCatClient("http://unused", "token", "pet", transport=transport)
         inventory = client.query_food_inventory()
         self.assertEqual(inventory.biscuits, 12)
-        self.assertEqual(inventory.shrimp, 10)
-        self.assertEqual(inventory.total, 22)
+        self.assertIsNone(inventory.shrimp)
+        self.assertEqual(inventory.raw_counter_2, 10)
+        self.assertEqual(inventory.total, 12)
 
     def test_bath_shop_and_inventory_are_decoded(self) -> None:
         soap = (

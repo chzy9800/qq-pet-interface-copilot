@@ -46,17 +46,22 @@ class PetValues:
 class FoodInventory:
     """Food counts returned by PetFeed_GetFeedTimesInfo.
 
-    Android QQ 9.3.25's food exchange sheet confirms field 1 is biscuits and
-    field 2 is shrimp.  Older code incorrectly labelled these as a remaining
-    allowance and a recovery value.
+    Field 1 tracks biscuits on the PC session. Field 2 is deliberately kept
+    as an unknown counter: a live Android 9.3.25 comparison showed 15 shrimp
+    in the food carousel while this endpoint still returned 10.
     """
 
     biscuits: int = 0
-    shrimp: int = 0
+    shrimp: int | None = None
+    raw_counter_2: int = 0
 
     @property
     def total(self) -> int:
-        return self.biscuits + self.shrimp
+        return self.biscuits + (self.shrimp or 0)
+
+    @property
+    def shrimp_text(self) -> str:
+        return str(self.shrimp) if self.shrimp is not None else "仅手机端可见"
 
 
 @dataclass(frozen=True)
@@ -345,12 +350,12 @@ class NapCatClient:
         return self.send_oidb(*self.FEED, field_string(4, self.pet_id))
 
     def query_food_inventory(self) -> FoodInventory:
-        # 手机 QQ 9.3.25 的“兑换食物/背包”页已实测：字段 1=饼干，字段 2=虾仁。
+        # 字段 1 与饼干增减一致。字段 2 不随手机端虾仁购买变化，不能当作虾仁库存。
         response = self.send_oidb(*self.FEED_TIMES, b"").body
         root = parse_message(response)
         return FoodInventory(
             biscuits=first_varint(root, 1),
-            shrimp=first_varint(root, 2),
+            raw_counter_2=first_varint(root, 2),
         )
 
     def query_feed_allowance(self) -> FoodInventory:

@@ -234,6 +234,7 @@ class Scheduler:
         state["food_inventory"] = {
             "biscuits": inventory.biscuits,
             "shrimp": inventory.shrimp,
+            "shrimp_status": inventory.shrimp_text,
         }
         if self.status_callback:
             bath_inventory = client.query_bath_inventory()
@@ -243,8 +244,8 @@ class Scheduler:
             }
             self.status_callback(values, story, state)
         self.log(
-                f"状态：金币 {values.gold:.2f}，心情 {values.feel:.1f}，体力 {values.hunger:.1f}，"
-            f"清洁 {values.clean:.1f}，饼干 {inventory.biscuits}，虾仁 {inventory.shrimp}，"
+            f"状态：金币 {values.gold:.2f}，心情 {values.feel:.1f}，体力 {values.hunger:.1f}，"
+            f"清洁 {values.clean:.1f}，饼干 {inventory.biscuits}，虾仁 {inventory.shrimp_text}，"
             f"今日 {state['counts']}"
         )
 
@@ -259,7 +260,7 @@ class Scheduler:
                 if inventory.biscuits <= 0:
                     if not care["auto_buy_supplies"]:
                         self.activity("缺少食物，自动购买未开启")
-                        self._block_care(config, "feed", f"饼干不足（虾仁 {inventory.shrimp}），自动购买已关闭")
+                        self._block_care(config, "feed", "饼干不足，自动购买已关闭")
                         return "feed_unavailable"
                     self.activity("正在购买食物")
                     buy_count = int(care["food_purchase_count"])
@@ -284,7 +285,7 @@ class Scheduler:
                     self.progress.increment("feed")
                     self.log(
                         f"体力不足，已自动喂食并验证成功：{values.hunger:.1f}→{after.hunger:.1f}，"
-                        f"剩余饼干 {inventory_after.biscuits}、虾仁 {inventory_after.shrimp}"
+                        f"剩余饼干 {inventory_after.biscuits}；虾仁库存仅手机端可见"
                     )
                     self.activity("喂食完成，等待下一轮")
                 else:

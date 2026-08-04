@@ -43,10 +43,10 @@ message FeedingResponse {
 }
 
 // Sso_PetFeed_GetFeedTimesInfo / OidbSvcTrpcTcp.0x9949_1.
-// Names were verified against Android QQ 9.3.25's food exchange sheet.
+// Compared live with Android QQ 9.3.25's food exchange sheet.
 message FoodInventoryResponse {
   int32 biscuits = 1;
-  int32 shrimp = 2;
+  int32 unknown_counter_2 = 2; // 实测不随手机端虾仁购买变化，不是虾仁库存。
 }
 
 message GetPetStoryStatusRequest {

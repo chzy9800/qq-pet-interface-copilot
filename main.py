@@ -431,7 +431,8 @@ class MainWindow(tk.Tk):
                     self.status_vars["gold"].set(f"{values.gold:.2f}")
                     inventory = state.get("food_inventory", {})
                     self.status_vars["food"].set(
-                        f"饼干 {inventory.get('biscuits', '--')} / 虾仁 {inventory.get('shrimp', '--')}"
+                        f"饼干 {inventory.get('biscuits', '--')} / "
+                        f"虾仁 {inventory.get('shrimp_status', '仅手机端可见')}"
                     )
                     bath_inventory = state.get("bath_inventory", {})
                     self.status_vars["bath"].set(
