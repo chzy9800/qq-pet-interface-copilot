@@ -236,6 +236,11 @@ class Scheduler:
             "shrimp": inventory.shrimp,
         }
         if self.status_callback:
+            bath_inventory = client.query_bath_inventory()
+            state["bath_inventory"] = {
+                "soap": bath_inventory.soap,
+                "bath_ball": bath_inventory.bath_ball,
+            }
             self.status_callback(values, story, state)
         self.log(
                 f"状态：金币 {values.gold:.2f}，心情 {values.feel:.1f}，体力 {values.hunger:.1f}，"

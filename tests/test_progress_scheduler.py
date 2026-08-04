@@ -9,6 +9,8 @@ from pathlib import Path
 from qqpet_app.client import (
     AdventureOption,
     AdventureStartResult,
+    BathInventory,
+    FoodInventory,
     PageRules,
     PetValues,
     SchoolCourse,
@@ -23,6 +25,36 @@ from qqpet_app.scheduler import Scheduler
 
 
 class ProgressAndSchedulerTests(unittest.TestCase):
+    def test_frontend_status_includes_bath_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            captured = []
+
+            class FakeClient:
+                def query_values(self):
+                    return PetValues(gold=1000, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus(
+                        "6400_active", 51, remaining_seconds=100, duration_seconds=200
+                    )
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+                def query_bath_inventory(self):
+                    return BathInventory(counts=(("1", 3), ("2", 4)))
+
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: FakeClient(),
+                status_callback=lambda _values, _story, state: captured.append(state),
+            )
+
+            self.assertEqual(scheduler.run_once(), "story")
+            self.assertEqual(captured[0]["bath_inventory"], {"soap": 3, "bath_ball": 4})
+
     def test_daily_rollover_archives_and_resets(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "progress.json"
