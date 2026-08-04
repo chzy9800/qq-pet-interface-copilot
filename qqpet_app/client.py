@@ -43,25 +43,48 @@ class PetValues:
 
 
 @dataclass(frozen=True)
-class FoodInventory:
-    """Food counts returned by PetFeed_GetFeedTimesInfo.
+class FoodItem:
+    food_id: str
+    name: str
+    balance: int
+    balance_max: int = 0
+    tq_pic: str = ""
+    resource_id: str = ""
+    selected_pic: str = ""
 
-    Field 1 tracks biscuits on the PC session. Field 2 is deliberately kept
-    as an unknown counter: a live Android 9.3.25 comparison showed 15 shrimp
-    in the food carousel while this endpoint still returned 10.
+
+@dataclass(frozen=True)
+class FoodInventory:
+    """Food inventory returned by PetFeed_GetFeedTimesInfo.
+
+    Response fields 1 and 2 are the remaining and maximum feed allowance.
+    Actual food balances are repeated ``FoodInventoryInfo`` messages in field
+    4. Some PC QQ sessions omit field 4; those balances remain unknown instead
+    of being replaced with the allowance counters.
     """
 
-    biscuits: int = 0
+    biscuits: int | None = None
     shrimp: int | None = None
-    raw_counter_2: int = 0
+    allowance_remaining: int = 0
+    allowance_max: int = 0
+    items: tuple[FoodItem, ...] = ()
 
     @property
     def total(self) -> int:
-        return self.biscuits + (self.shrimp or 0)
+        return (self.biscuits or 0) + (self.shrimp or 0)
+
+    @property
+    def raw_counter_2(self) -> int:
+        """Backward-compatible alias for the formerly unidentified field 2."""
+        return self.allowance_max
+
+    @property
+    def biscuits_text(self) -> str:
+        return str(self.biscuits) if self.biscuits is not None else "未下发"
 
     @property
     def shrimp_text(self) -> str:
-        return str(self.shrimp) if self.shrimp is not None else "仅手机端可见"
+        return str(self.shrimp) if self.shrimp is not None else "未下发"
 
 
 @dataclass(frozen=True)
@@ -346,16 +369,45 @@ class NapCatClient:
         gold_value = first_float(parse_message(first_bytes(gold_root, 5)), 3)
         return PetValues(current(1), current(2), current(3), current(4), gold_value)
 
-    def feed(self) -> OidbResponse:
-        return self.send_oidb(*self.FEED, field_string(4, self.pet_id))
+    def feed(self, food_id: str = "") -> OidbResponse:
+        request = field_string(4, self.pet_id)
+        if food_id:
+            request += field_string(11, food_id)
+        return self.send_oidb(*self.FEED, request)
 
     def query_food_inventory(self) -> FoodInventory:
-        # 字段 1 与饼干增减一致。字段 2 不随手机端虾仁购买变化，不能当作虾仁库存。
-        response = self.send_oidb(*self.FEED_TIMES, b"").body
+        # Android's s4.g request serializes an explicitly present, empty field
+        # 4 (22 00).  Keep that wire shape instead of collapsing it to an empty
+        # message; server variants may use field presence when selecting the
+        # rich inventory response.
+        response = self.send_oidb(*self.FEED_TIMES, field_string(4, "")).body
         root = parse_message(response)
+        items: list[FoodItem] = []
+        for value in root.get(4, []):
+            if value.wire_type != 2:
+                continue
+            item = parse_message(bytes(value.value))
+            items.append(
+                FoodItem(
+                    food_id=first_string(item, 4),
+                    name=first_string(item, 3),
+                    balance=first_varint(item, 1),
+                    balance_max=first_varint(item, 2),
+                    tq_pic=first_string(item, 5),
+                    resource_id=first_string(item, 6),
+                    selected_pic=first_string(item, 7),
+                )
+            )
+
+        def balance_for(name: str) -> int | None:
+            return next((item.balance for item in items if name in item.name), None)
+
         return FoodInventory(
-            biscuits=first_varint(root, 1),
-            raw_counter_2=first_varint(root, 2),
+            biscuits=balance_for("饼干"),
+            shrimp=balance_for("虾仁"),
+            allowance_remaining=first_varint(root, 1),
+            allowance_max=first_varint(root, 2),
+            items=tuple(items),
         )
 
     def query_feed_allowance(self) -> FoodInventory:

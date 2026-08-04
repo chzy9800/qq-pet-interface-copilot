@@ -233,8 +233,11 @@ class Scheduler:
         inventory = client.query_food_inventory()
         state["food_inventory"] = {
             "biscuits": inventory.biscuits,
+            "biscuits_status": inventory.biscuits_text,
             "shrimp": inventory.shrimp,
             "shrimp_status": inventory.shrimp_text,
+            "allowance_remaining": inventory.allowance_remaining,
+            "allowance_max": inventory.allowance_max,
         }
         if self.status_callback:
             bath_inventory = client.query_bath_inventory()
@@ -245,7 +248,7 @@ class Scheduler:
             self.status_callback(values, story, state)
         self.log(
             f"状态：金币 {values.gold:.2f}，心情 {values.feel:.1f}，体力 {values.hunger:.1f}，"
-            f"清洁 {values.clean:.1f}，饼干 {inventory.biscuits}，虾仁 {inventory.shrimp_text}，"
+            f"清洁 {values.clean:.1f}，饼干 {inventory.biscuits_text}，虾仁 {inventory.shrimp_text}，"
             f"今日 {state['counts']}"
         )
 
@@ -257,7 +260,7 @@ class Scheduler:
             if not self._safe_or_blocked(config, "喂食"):
                 # The recovered Feeding request uses feed_type=0, which is the
                 # biscuit path.  Do not assume it can consume shrimp.
-                if inventory.biscuits <= 0:
+                if inventory.biscuits == 0:
                     if not care["auto_buy_supplies"]:
                         self.activity("缺少食物，自动购买未开启")
                         self._block_care(config, "feed", "饼干不足，自动购买已关闭")
@@ -267,7 +270,12 @@ class Scheduler:
                     before_count = inventory.biscuits
                     purchase = client.buy_food(buy_count)
                     inventory = client.query_food_inventory()
-                    if purchase.bought <= 0 and inventory.biscuits <= before_count:
+                    if (
+                        purchase.bought <= 0
+                        and inventory.biscuits is not None
+                        and before_count is not None
+                        and inventory.biscuits <= before_count
+                    ):
                         self._block_care(config, "feed", "金币购买饼干未到账")
                         self.activity("购买食物失败，等待重试")
                         return "feed_unavailable"
@@ -280,12 +288,17 @@ class Scheduler:
                 self._verify_delay(config)
                 after = client.query_values()
                 inventory_after = client.query_food_inventory()
-                if after.hunger > values.hunger or inventory_after.biscuits < inventory.biscuits:
+                inventory_decreased = (
+                    inventory_after.biscuits is not None
+                    and inventory.biscuits is not None
+                    and inventory_after.biscuits < inventory.biscuits
+                )
+                if after.hunger > values.hunger or inventory_decreased:
                     self.progress.clear_care_block("feed")
                     self.progress.increment("feed")
                     self.log(
                         f"体力不足，已自动喂食并验证成功：{values.hunger:.1f}→{after.hunger:.1f}，"
-                        f"剩余饼干 {inventory_after.biscuits}；虾仁库存仅手机端可见"
+                        f"剩余饼干 {inventory_after.biscuits_text}；虾仁 {inventory_after.shrimp_text}"
                     )
                     self.activity("喂食完成，等待下一轮")
                 else:
