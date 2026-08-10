@@ -1,0 +1,36 @@
+name: Build Windows one-click package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install packager
+        run: python -m pip install --disable-pip-version-check pyinstaller==6.15.0
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+      - name: Build executable
+        run: pyinstaller --clean --noconfirm QQPetInterfaceCopilot.spec
+      - name: Prepare package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path package | Out-Null
+          Copy-Item 'dist\QQ宠物助手.exe' package\
+          Copy-Item config.example.yaml package\
+          Copy-Item README.md,LICENSE package\
+          Compress-Archive -Path package\* -DestinationPath QQ-Pet-Interface-Copilot-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: QQ-Pet-Interface-Copilot-Windows-x64
+          path: QQ-Pet-Interface-Copilot-Windows-x64.zip

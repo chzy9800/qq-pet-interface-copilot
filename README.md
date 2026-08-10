@@ -47,17 +47,47 @@
 
 ## 快速开始
 
-1. 准备已登录目标账号的电脑版 QQ 和 NapCat，并创建仅监听 `127.0.0.1` 的 OneBot HTTP 服务。
-2. 复制 `config.example.yaml` 为 `config.yaml`，填写自己的 UIN、`pet_id`、端口和本机令牌。
-3. 使用 Python 3.11+ 运行：
+### 一键启动（Windows）
+
+双击 `start-interface-copilot.bat`，启动器会依次完成：
+
+1. 检查电脑版 QQ、NapCatQQ Desktop 和本机 OneBot 接口。
+2. NapCat 未安装时，从官方 GitHub 下载 Windows x64 MSI，核对官方 SHA-256 后启动安装。
+3. 启动 NapCat；QQ 尚未登录时等待用户扫码或完成 QQ 登录确认。
+4. 从 NapCat `get_login_info` 读取当前 QQ 账号，从本机 NapCat 配置读取接口端口和令牌；若尚未配置 HTTP 服务，会仅增加一个随机令牌、仅监听 `127.0.0.1` 的本机接口。
+5. 验证宠物状态后保存本机配置并打开控制台。
+
+首次接入尚未记录的宠物时，需要输入一次 `petId`；验证通过后不会再次询问。启动器不会导出 QQ 会话，也不会把接口令牌上传到网络。
+
+也可以下载 GitHub Actions 生成的 `QQ-Pet-Interface-Copilot-Windows-x64.zip`，解压后直接运行 `QQ宠物助手.exe`。
+
+### 开发者启动
+
+准备已登录目标账号的电脑版 QQ 和 NapCat，使用 Python 3.11+ 运行：
 
 ```powershell
-py -3 main.py
+py -3 launcher.py
 ```
 
-也可以双击 `start-interface-copilot.bat`。
-
 首次接入新账号时建议保留安全模式，确认状态读取正常后再开放写操作。
+
+## 运行流程
+
+```text
+电脑版 QQ 登录
+      ↓
+NapCat 使用本机会话并开放 127.0.0.1 OneBot 接口
+      ↓
+一键启动器发现账号、接口端口与本机令牌
+      ↓
+QQ 宠物助手读取服务器状态和动态规则
+      ↓
+统一调度器执行照顾、学习、打工、冒险和 PK
+      ↓
+重新读取服务器状态验证结果，并写入 runs/ 每日进度
+```
+
+本项目不包含 QQ 或 NapCat。GPL-3.0-only 只覆盖本仓库代码；QQ 与 NapCat 分别遵循其自身许可和使用条款。正常运行无需 ADB，ADB 仅用于协议研究阶段的调试。
 
 ## 测试
 

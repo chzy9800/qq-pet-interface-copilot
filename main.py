@@ -13,9 +13,14 @@ from qqpet_app.client import NapCatClient
 from qqpet_app.config import ConfigStore
 from qqpet_app.friend_visits import FriendVisitProgress, eligible_friends
 from qqpet_app.scheduler import Scheduler
+from qqpet_app.single_instance import SingleInstance
 
 
-ROOT = Path(__file__).resolve().parent
+ROOT = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parent
+)
 CONFIG_PATH = ROOT / "config.yaml"
 PROGRESS_PATH = ROOT / "runs" / "daily_progress.json"
 LOG_DIR = ROOT / "runs" / "logs"
@@ -659,4 +664,14 @@ class MainWindow(tk.Tk):
 
 
 if __name__ == "__main__":
-    MainWindow(auto_start="--autostart" in sys.argv[1:]).mainloop()
+    instance = SingleInstance(ROOT / "runs" / ".console.lock")
+    if not instance.acquire():
+        popup = tk.Tk()
+        popup.withdraw()
+        messagebox.showinfo("QQ 宠物助手", "控制台已经在运行，无需重复启动。")
+        popup.destroy()
+        raise SystemExit(0)
+    try:
+        MainWindow(auto_start="--autostart" in sys.argv[1:]).mainloop()
+    finally:
+        instance.release()

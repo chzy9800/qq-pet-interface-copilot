@@ -26,6 +26,9 @@ __pycache__/
 *.xz
 *.exe
 *.dll
+downloads/
+build/
+dist/
 hs_err_pid*
 
 # Private investigation notes
