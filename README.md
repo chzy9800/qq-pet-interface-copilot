@@ -1,8 +1,12 @@
-# QQ 宠物接口助手（Public Preview）
+# QQ Pet Interface Copilot / QQ 宠物接口助手
 
-一个正在验证中的电脑端 QQ 宠物自动控制工具。项目复用已登录电脑版 QQ/NapCat 的会话、签名和加密封包，通过本机 OneBot `send_packet` 调用宠物 OIDB 接口，不需要长期连接手机或 ADB。
+中文：一个正在验证中的电脑端 QQ 宠物自动控制工具。项目复用已登录电脑版 QQ/NapCat 的会话、签名和加密封包，通过本机 OneBot `send_packet` 调用宠物 OIDB 接口，不需要长期连接手机或 ADB。
 
-> 当前仓库用于展示阶段性成果，处于公开预览阶段。请只操作自己的 QQ 账号，并自行承担非公开接口发生变化的风险。
+English: A PC-side QQ pet automation assistant under active validation. It reuses the session, signing, and encrypted packet capability of an already logged-in QQ/NapCat instance, then calls pet OIDB APIs through local OneBot `send_packet`; it does not require a persistent phone or ADB connection.
+
+> 中文：当前仓库用于展示阶段性成果，处于公开预览阶段。请只操作自己的 QQ 账号，并自行承担非公开接口发生变化的风险。
+>
+> English: This repository is a public preview of work in progress. Use it only with your own QQ account and accept the risk that undocumented interfaces may change.
 
 ## 已验证成果
 
