@@ -663,9 +663,10 @@ class Scheduler:
         if friend_care_action:
             return friend_care_action
 
-        # Care actions are allowed while a school/work/adventure story is in
-        # progress.  Check them first so a long-running story cannot starve
-        # feeding or washing for its entire duration.
+        # Friend care and PK are side tasks.  Run them while a school, work, or
+        # adventure story remains active instead of waiting for that story to
+        # finish. Requests stay serialized within this scheduler pass so the
+        # same side action cannot be submitted twice at the same instant.
         pk_action = self._run_pk_if_due(client, config, values)
         if pk_action:
             return pk_action

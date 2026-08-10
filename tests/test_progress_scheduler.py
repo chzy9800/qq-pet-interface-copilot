@@ -322,6 +322,98 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(saved["gold_earned"], 42)
             self.assertTrue(saved["records"][0]["verified"])
 
+    def test_auto_pk_runs_while_primary_story_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["pk"].update(
+                {
+                    "enabled": True,
+                    "start_time": "00:00",
+                    "max_per_day": 1,
+                    "opponent_mode": "fixed",
+                    "opponent_uin": "10001",
+                    "opponent_pet_id": "friend-pet",
+                    "opponent_name": "弱对手",
+                    "opponent_power": 10,
+                }
+            )
+            config["safety"]["safe_mode"] = False
+            store.save(config)
+
+            class FakeClient:
+                runs = 0
+
+                def query_values(self):
+                    return PetValues(feel=80, gold=100, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus(
+                        story_id="6400_working",
+                        state_code=51,
+                        remaining_seconds=600,
+                        duration_seconds=14400,
+                    )
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=10, shrimp=10)
+
+                def query_pk_power(self, pet_id=""):
+                    return PKPower(pet_id or "self", 10 if pet_id else 1713)
+
+                def perform_pk(self, uin, pet_id, wait_seconds):
+                    self.runs += 1
+                    return PKResult(
+                        uin,
+                        pet_id,
+                        "6900_verified",
+                        PetValues(feel=80, gold=100, hunger=100, clean=100),
+                        PetValues(feel=82, gold=142, hunger=95, clean=95),
+                        OidbResponse(38752, 1, 0, b"result", b"raw"),
+                    )
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "pk")
+            self.assertEqual(fake.runs, 1)
+            self.assertEqual(scheduler.pk_progress.snapshot()["success"], 1)
+
+    def test_friend_care_runs_before_an_active_primary_story(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["friend_care"]["enabled"] = True
+            store.save(config)
+
+            class FakeClient:
+                def query_values(self):
+                    return PetValues(feel=80, gold=100, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus(
+                        story_id="6500_studying",
+                        state_code=2,
+                        remaining_seconds=600,
+                        duration_seconds=3600,
+                    )
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=10, shrimp=10)
+
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: FakeClient(),
+            )
+            scheduler._run_friend_care_if_due = lambda _client, _config: "friend_feed"
+            self.assertEqual(scheduler.run_once(), "friend_feed")
+
     def test_auto_pk_uses_each_friend_three_times_before_switching(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
