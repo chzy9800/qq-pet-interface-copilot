@@ -70,3 +70,7 @@ py -3 -m unittest discover -s tests -v
 - `config.yaml`、运行日志、抓包、APK、设备提取物和账号响应均被 `.gitignore` 排除。
 - 不要把 OneBot 端口监听到公网，也不要提交真实 UIN、`pet_id` 或访问令牌。
 - 仓库不包含 QQ、NapCat、APK 或其他第三方二进制文件。
+
+## 许可证
+
+本项目采用 [GNU General Public License v3.0](LICENSE)（GPL-3.0-only）授权。任何再发布或修改后的版本均须遵守该许可证并提供相应源代码。
