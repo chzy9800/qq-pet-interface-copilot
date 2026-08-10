@@ -31,6 +31,124 @@ from qqpet_app.scheduler import Scheduler
 
 
 class ProgressAndSchedulerTests(unittest.TestCase):
+    def test_friend_care_feeds_only_listed_hungry_friend_and_verifies_change(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["friend_care"].update(
+                {
+                    "enabled": True,
+                    "check_interval_seconds": 15,
+                    "hunger_threshold": 80,
+                    "verify_delay_seconds": 0,
+                    "targets": [
+                        {"uin": "10001", "pet_id": "friend-pet", "name": "好友甲"}
+                    ],
+                }
+            )
+            store.save(config)
+
+            class FriendClient:
+                def __init__(self):
+                    self.fed = False
+
+                def query_values(self):
+                    return PetValues(hunger=90 if self.fed else 50, clean=90)
+
+                def feed(self):
+                    self.fed = True
+
+            friend_client = FriendClient()
+
+            def factory(received):
+                self.assertEqual(received["account"]["pet_id"], "friend-pet")
+                return friend_client
+
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=factory,
+            )
+            self.assertEqual(
+                scheduler._run_friend_care_if_due(object(), config), "friend_feed"
+            )
+            self.assertTrue(friend_client.fed)
+            self.assertEqual(scheduler.progress.count("friend_feed"), 1)
+            self.assertEqual(scheduler.progress.count("pk"), 0)
+
+    def test_friend_care_does_not_feed_friend_above_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["friend_care"].update(
+                {
+                    "enabled": True,
+                    "check_interval_seconds": 15,
+                    "hunger_threshold": 80,
+                    "targets": [
+                        {"uin": "10001", "pet_id": "friend-pet", "name": "好友甲"}
+                    ],
+                }
+            )
+            store.save(config)
+
+            class FriendClient:
+                def query_values(self):
+                    return PetValues(hunger=80, clean=90)
+
+                def feed(self):
+                    raise AssertionError("达到阈值的好友不应被喂食")
+
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: FriendClient(),
+            )
+            self.assertIsNone(scheduler._run_friend_care_if_due(object(), config))
+            self.assertEqual(scheduler.progress.count("friend_feed"), 0)
+
+    def test_friend_care_does_not_count_success_code_without_hunger_change(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["friend_care"].update(
+                {
+                    "enabled": True,
+                    "check_interval_seconds": 15,
+                    "hunger_threshold": 80,
+                    "verify_delay_seconds": 0,
+                    "failure_cooldown_seconds": 600,
+                    "targets": [
+                        {"uin": "10001", "pet_id": "friend-pet", "name": "好友甲"}
+                    ],
+                }
+            )
+            store.save(config)
+
+            class FriendClient:
+                def query_values(self):
+                    return PetValues(hunger=50, clean=90)
+
+                def feed(self):
+                    return None
+
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: FriendClient(),
+            )
+            self.assertEqual(
+                scheduler._run_friend_care_if_due(object(), config),
+                "friend_feed_failed",
+            )
+            self.assertEqual(scheduler.progress.count("friend_feed"), 0)
+            self.assertIsNotNone(scheduler.progress.active_care_block("friend_feed:10001"))
+
     def test_employed_recall_waits_for_best_split_and_counts_once(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

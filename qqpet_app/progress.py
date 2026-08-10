@@ -16,6 +16,7 @@ EMPTY_COUNTS = {
     "feed": 0,
     "wash": 0,
     "pk": 0,
+    "friend_feed": 0,
 }
 
 

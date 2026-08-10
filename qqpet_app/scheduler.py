@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import threading
 import time
 from datetime import datetime
@@ -44,6 +45,7 @@ class Scheduler:
         self._consecutive_failures = 0
         self._last_alert_at = 0.0
         self._failure_alerted = False
+        self._last_friend_care_check = 0.0
 
     @staticmethod
     def _make_client(config: dict) -> NapCatClient:
@@ -459,6 +461,74 @@ class Scheduler:
             "真实访问协议未确认前不会发送访问或踩踩请求"
         )
 
+    def _run_friend_care_if_due(
+        self, _client: NapCatClient, config: dict
+    ) -> str | None:
+        care = config["friend_care"]
+        targets = care.get("targets", [])
+        if not care.get("enabled", False) or not targets:
+            return None
+        now = time.monotonic()
+        interval = max(15.0, float(care.get("check_interval_seconds", 60)))
+        if self._last_friend_care_check and now - self._last_friend_care_check < interval:
+            return None
+        self._last_friend_care_check = now
+        threshold = float(care.get("hunger_threshold", 80))
+        for target in targets:
+            uin = str(target["uin"])
+            pet_id = str(target["pet_id"])
+            name = str(target.get("name") or uin)
+            block_key = f"friend_feed:{uin}"
+            if self.progress.active_care_block(block_key):
+                continue
+            friend_config = copy.deepcopy(config)
+            friend_config["account"]["pet_id"] = pet_id
+            try:
+                friend_client = self.client_factory(friend_config)
+                before = friend_client.query_values()
+            except Exception as exc:
+                cooldown = float(care.get("failure_cooldown_seconds", 600))
+                self.progress.set_care_block(block_key, f"好友状态读取失败：{exc}", cooldown)
+                self.log(f"好友照顾检查失败：{name}（QQ {uin}）：{exc}")
+                continue
+            self.log(
+                f"好友照顾检查：{name}（QQ {uin}）体力 {before.hunger:.1f}/100"
+            )
+            if before.hunger >= threshold:
+                self.progress.clear_care_block(block_key)
+                continue
+            self.activity(f"好友 {name} 体力不足，正在自动喂食")
+            if self._safe_or_blocked(config, f"给好友 {name} 喂食"):
+                return "friend_feed_blocked"
+            try:
+                friend_client.feed()
+                self._stop.wait(max(0.0, float(care.get("verify_delay_seconds", 1))))
+                after = friend_client.query_values()
+            except Exception as exc:
+                cooldown = float(care.get("failure_cooldown_seconds", 600))
+                self.progress.set_care_block(block_key, f"好友喂食请求失败：{exc}", cooldown)
+                self.log(f"好友自动喂食失败：{name}（QQ {uin}）：{exc}")
+                return "friend_feed_failed"
+            if after.hunger <= before.hunger:
+                cooldown = float(care.get("failure_cooldown_seconds", 600))
+                self.progress.set_care_block(
+                    block_key, "好友喂食响应后体力未上涨", cooldown
+                )
+                self.log(
+                    f"好友喂食未生效：{name}（QQ {uin}）体力仍为 {after.hunger:.1f}；"
+                    f"{int(cooldown)} 秒后重试"
+                )
+                return "friend_feed_failed"
+            self.progress.clear_care_block(block_key)
+            count = self.progress.increment("friend_feed")
+            self.activity(f"好友 {name} 喂食完成")
+            self.log(
+                f"好友自动喂食已由服务器验证：{name}（QQ {uin}）"
+                f"{before.hunger:.1f}→{after.hunger:.1f}；今日好友喂食 {count} 次"
+            )
+            return "friend_feed"
+        return None
+
     def run_once(self) -> str | None:
         self.activity("正在检查宠物状态")
         config = self.config_store.data
@@ -470,6 +540,11 @@ class Scheduler:
         story = client.query_story()
         state = self.progress.snapshot()
         state["friend_visit_summary"] = self.friend_progress.summary()
+        state["friend_care_summary"] = {
+            "enabled": bool(config["friend_care"].get("enabled", False)),
+            "targets": len(config["friend_care"].get("targets", [])),
+            "feeds": int(state["counts"].get("friend_feed", 0)),
+        }
         pk_summary = self.pk_progress.snapshot()
         pk_summary["opponent_mode"] = config["pk"].get("opponent_mode", "fixed")
         pk_summary["friend_pool_count"] = len(self._pk_candidate_cache)
@@ -583,6 +658,10 @@ class Scheduler:
                     )
                     self.activity("洗澡未生效，等待重试")
             return "wash"
+
+        friend_care_action = self._run_friend_care_if_due(client, config)
+        if friend_care_action:
+            return friend_care_action
 
         # Care actions are allowed while a school/work/adventure story is in
         # progress.  Check them first so a long-running story cannot starve

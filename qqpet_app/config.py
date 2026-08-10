@@ -72,6 +72,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "whitelist": "",
         "exclude": "",
     },
+    "friend_care": {
+        "enabled": False,
+        "check_interval_seconds": 60,
+        "hunger_threshold": 80,
+        "verify_delay_seconds": 1,
+        "failure_cooldown_seconds": 600,
+        "targets": [],
+    },
     "care": {
         "enabled": True,
         "hunger_threshold": 80,
@@ -219,6 +227,28 @@ class ConfigStore:
         maximum = float(config["friend_visits"]["interval_max_seconds"])
         if minimum < 1 or maximum < minimum:
             raise ValueError("好友访问间隔必须至少 1 秒，且最大值不能小于最小值")
+        if float(config["friend_care"]["check_interval_seconds"]) < 15:
+            raise ValueError("friend_care.check_interval_seconds 不能小于 15 秒")
+        if not 0 <= float(config["friend_care"]["hunger_threshold"]) <= 100:
+            raise ValueError("friend_care.hunger_threshold 必须在 0 到 100 之间")
+        if float(config["friend_care"]["verify_delay_seconds"]) < 0:
+            raise ValueError("friend_care.verify_delay_seconds 不能小于 0")
+        if float(config["friend_care"]["failure_cooldown_seconds"]) < 0:
+            raise ValueError("friend_care.failure_cooldown_seconds 不能小于 0")
+        targets = config["friend_care"].get("targets", [])
+        if not isinstance(targets, list):
+            raise ValueError("friend_care.targets 必须是列表")
+        seen_targets: set[str] = set()
+        for target in targets:
+            if not isinstance(target, dict):
+                raise ValueError("好友照顾名单条目必须是对象")
+            uin = str(target.get("uin", ""))
+            pet_id = str(target.get("pet_id", ""))
+            if not uin.isdigit() or not pet_id:
+                raise ValueError("好友照顾名单必须包含有效 QQ 号和 petId")
+            if uin in seen_targets:
+                raise ValueError(f"好友照顾名单中 QQ {uin} 重复")
+            seen_targets.add(uin)
         for section, key in (
             ("scheduler", "interval_seconds"),
             ("care", "hunger_threshold"),

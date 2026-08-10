@@ -69,6 +69,11 @@ SETTING_FIELDS = [
     ("friend_visits.poke_enabled", "访问成功后踩踩", bool),
     ("friend_visits.whitelist", "好友白名单（逗号分隔，空=全部）", str),
     ("friend_visits.exclude", "好友排除名单（逗号分隔）", str),
+    ("friend_care.enabled", "启用好友自动照顾", bool),
+    ("friend_care.check_interval_seconds", "好友照顾检查间隔（秒）", float),
+    ("friend_care.hunger_threshold", "好友体力喂食阈值", float),
+    ("friend_care.verify_delay_seconds", "好友喂食后验证等待（秒）", float),
+    ("friend_care.failure_cooldown_seconds", "好友照顾失败冷却（秒）", float),
     ("care.enabled", "启用状态照顾", bool),
     ("care.hunger_threshold", "体力喂食阈值", float),
     ("care.clean_threshold", "清洁洗澡阈值", float),
@@ -159,11 +164,15 @@ class MainWindow(tk.Tk):
         self.manual_pk_status_var = tk.StringVar(value="请选择好友或输入 QQ 号")
         self.manual_pk_friend_uins: dict[str, str] = {}
         self.manual_pk_cached_opponents: dict[str, PKOpponent] = {}
+        self.friend_care_friend_var = tk.StringVar(value="请先刷新好友")
+        self.friend_care_uin_var = tk.StringVar()
+        self.friend_care_status_var = tk.StringVar(value="照顾名单为空")
+        self.friend_care_friend_uins: dict[str, str] = {}
         self.status_vars = {
             key: tk.StringVar(value="--")
             for key in (
                 "connection", "gold", "food", "bath", "mood", "hunger",
-                "clean", "total", "story", "counts", "pk", "friend_visits",
+                "clean", "total", "story", "counts", "pk", "friend_visits", "friend_care",
             )
         }
         self._build_ui()
@@ -202,6 +211,7 @@ class MainWindow(tk.Tk):
         self._status_row(left, "今日次数", "counts", small=True)
         self._status_row(left, "自动 PK", "pk", small=True)
         self._status_row(left, "好友访问", "friend_visits", small=True)
+        self._status_row(left, "好友照顾", "friend_care", small=True)
 
         buttons = ttk.Frame(left)
         buttons.pack(fill=tk.X, pady=(22, 0))
@@ -228,9 +238,11 @@ class MainWindow(tk.Tk):
         notebook.pack(fill=tk.BOTH, expand=True)
         log_page = ttk.Frame(notebook, padding=10)
         manual_pk_page = ttk.Frame(notebook, padding=16)
+        friend_care_page = ttk.Frame(notebook, padding=16)
         settings_page = ttk.Frame(notebook, padding=10)
         notebook.add(log_page, text="运行日志")
         notebook.add(manual_pk_page, text="PK 好友")
+        notebook.add(friend_care_page, text="好友照顾")
         notebook.add(settings_page, text="设置")
 
         self.log_text = tk.Text(log_page, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 10))
@@ -240,6 +252,7 @@ class MainWindow(tk.Tk):
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self._build_manual_pk_page(manual_pk_page)
+        self._build_friend_care_page(friend_care_page)
 
         canvas = tk.Canvas(settings_page, highlightthickness=0)
         scroll = ttk.Scrollbar(settings_page, orient=tk.VERTICAL, command=canvas.yview)
@@ -430,6 +443,129 @@ class MainWindow(tk.Tk):
             power=int(pk.get("opponent_power", 0)),
         )
 
+    def _build_friend_care_page(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="好友自动照顾名单", style="Title.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 12)
+        )
+        ttk.Label(
+            parent,
+            text="只监控名单中的好友；体力低于阈值才喂食，并重新读取好友体力验证。",
+            foreground="#666",
+            wraplength=540,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
+        ttk.Label(parent, text="选择 QQ 好友").grid(row=2, column=0, sticky="w", pady=6)
+        self.friend_care_friend_combo = ttk.Combobox(
+            parent,
+            textvariable=self.friend_care_friend_var,
+            state="readonly",
+            width=42,
+        )
+        self.friend_care_friend_combo.grid(row=2, column=1, columnspan=2, sticky="ew", padx=8, pady=6)
+        self.friend_care_friend_combo.bind(
+            "<<ComboboxSelected>>", self._friend_care_friend_selected
+        )
+        ttk.Label(parent, text="好友 QQ 账号").grid(row=3, column=0, sticky="w", pady=6)
+        ttk.Entry(parent, textvariable=self.friend_care_uin_var, width=44).grid(
+            row=3, column=1, columnspan=2, sticky="ew", padx=8, pady=6
+        )
+        self.friend_care_add_button = ttk.Button(
+            parent, text="解析宠物并加入自动照顾名单", command=self._add_friend_care_target
+        )
+        self.friend_care_add_button.grid(
+            row=4, column=0, columnspan=3, sticky="ew", pady=(10, 6)
+        )
+        ttk.Label(parent, text="当前照顾名单").grid(row=5, column=0, sticky="nw", pady=6)
+        self.friend_care_listbox = tk.Listbox(parent, height=9, exportselection=False)
+        self.friend_care_listbox.grid(
+            row=5, column=1, columnspan=2, sticky="nsew", padx=8, pady=6
+        )
+        self.friend_care_remove_button = ttk.Button(
+            parent, text="从照顾名单移除", command=self._remove_friend_care_target
+        )
+        self.friend_care_remove_button.grid(
+            row=6, column=0, columnspan=3, sticky="ew", pady=6
+        )
+        ttk.Label(
+            parent,
+            textvariable=self.friend_care_status_var,
+            foreground="#555",
+            wraplength=540,
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        parent.columnconfigure(1, weight=1)
+        parent.rowconfigure(5, weight=1)
+
+    def _reload_friend_care_targets(self) -> None:
+        targets = self.config_store.data["friend_care"].get("targets", [])
+        self.friend_care_listbox.delete(0, tk.END)
+        for target in targets:
+            self.friend_care_listbox.insert(
+                tk.END,
+                f"{target.get('name') or target['uin']}｜QQ {target['uin']}｜petId {target['pet_id']}",
+            )
+        care = self.config_store.data["friend_care"]
+        state = "已启用" if care.get("enabled") else "未启用"
+        self.friend_care_status_var.set(
+            f"{state}；监控 {len(targets)} 位好友；低于 {float(care['hunger_threshold']):g} 自动喂食；"
+            f"每 {float(care['check_interval_seconds']):g} 秒检查"
+        )
+
+    def _friend_care_friend_selected(self, _event=None) -> None:
+        uin = self.friend_care_friend_uins.get(self.friend_care_friend_var.get(), "")
+        if uin:
+            self.friend_care_uin_var.set(uin)
+
+    def _add_friend_care_target(self) -> None:
+        uin = self.friend_care_uin_var.get().strip()
+        if not uin.isdigit():
+            messagebox.showerror("无法加入", "请输入有效的好友 QQ 号", parent=self)
+            return
+        self.friend_care_add_button.configure(state=tk.DISABLED)
+        self.friend_care_status_var.set(f"正在解析 QQ {uin} 的真实宠物资料…")
+
+        def worker() -> None:
+            try:
+                config = self.config_store.data
+                client = NapCatClient(
+                    config["napcat"]["url"],
+                    config["napcat"]["token"],
+                    config["account"]["pet_id"],
+                    float(config["napcat"]["timeout_seconds"]),
+                )
+                opponent = client.resolve_pk_opponent(
+                    uin, self._configured_pk_opponent(config)
+                )
+                friend_values_client = NapCatClient(
+                    config["napcat"]["url"],
+                    config["napcat"]["token"],
+                    opponent.pet_id,
+                    float(config["napcat"]["timeout_seconds"]),
+                )
+                values = friend_values_client.query_values()
+                self.events.put(("friend_care_target_resolved", (opponent, values)))
+            except Exception as exc:
+                self.events.put(("friend_care_target_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _remove_friend_care_target(self) -> None:
+        selected = self.friend_care_listbox.curselection()
+        if not selected:
+            messagebox.showinfo("好友照顾", "请先选择要移除的好友", parent=self)
+            return
+        index = int(selected[0])
+        config = self.config_store.data
+        targets = list(config["friend_care"].get("targets", []))
+        if index >= len(targets):
+            return
+        removed = targets.pop(index)
+        config["friend_care"]["targets"] = targets
+        self.config_store.save(config)
+        self._reload_friend_care_targets()
+        self._append_log(
+            f"[{datetime.now():%H:%M:%S}] 已从自动照顾名单移除 "
+            f"{removed.get('name') or removed['uin']}（QQ {removed['uin']}）"
+        )
+
     def _load_settings(self) -> None:
         config = self.config_store.data
         for path, (variable, _value_type) in self.setting_vars.items():
@@ -463,6 +599,7 @@ class MainWindow(tk.Tk):
             self.adventure_var.set(label)
         else:
             self.adventure_var.set("自动选择服务器当前可用冒险")
+        self._reload_friend_care_targets()
 
     def _refresh_school_courses(self) -> None:
         self.course_refresh_button.configure(state=tk.DISABLED)
@@ -805,6 +942,13 @@ class MainWindow(tk.Tk):
                             f"已访问{visit_summary.get('already_visited', 0)} "
                             f"失败{visit_summary.get('failed', 0)}"
                         )
+                    care_summary = state.get("friend_care_summary", {})
+                    if care_summary:
+                        care_state = "开启" if care_summary.get("enabled") else "关闭"
+                        self.status_vars["friend_care"].set(
+                            f"{care_state} / 名单 {care_summary.get('targets', 0)} / "
+                            f"今日喂食 {care_summary.get('feeds', 0)}"
+                        )
                 elif kind == "connection":
                     self.status_vars["connection"].set(str(payload))
                 elif kind == "activity":
@@ -854,6 +998,10 @@ class MainWindow(tk.Tk):
                     options.sort(key=str.casefold)
                     self.manual_pk_friend_uins = uins
                     self.manual_pk_friend_combo.configure(values=tuple(options))
+                    self.friend_care_friend_uins = dict(uins)
+                    self.friend_care_friend_combo.configure(values=tuple(options))
+                    if options and self.friend_care_friend_var.get() not in uins:
+                        self.friend_care_friend_var.set("请选择好友")
                     selected = next(
                         (label for label in options if uins[label] == configured_uin),
                         "请选择好友" if options else "未读取到 QQ 好友",
@@ -878,6 +1026,45 @@ class MainWindow(tk.Tk):
                     self.manual_pk_lookup_button.configure(state=tk.NORMAL)
                     self._append_log(
                         f"[{datetime.now():%H:%M:%S}] 手动 PK 好友读取失败：{payload}"
+                    )
+                elif kind == "friend_care_target_resolved":
+                    opponent, values = payload
+                    config = self.config_store.data
+                    targets = list(config["friend_care"].get("targets", []))
+                    target = {
+                        "uin": opponent.user_id,
+                        "pet_id": opponent.pet_id,
+                        "name": opponent.nickname or opponent.pet_name or opponent.user_id,
+                    }
+                    existing = next(
+                        (index for index, item in enumerate(targets) if str(item["uin"]) == opponent.user_id),
+                        None,
+                    )
+                    if existing is None:
+                        targets.append(target)
+                    else:
+                        targets[existing] = target
+                    config["friend_care"]["targets"] = targets
+                    config["friend_care"]["enabled"] = True
+                    self.config_store.save(config)
+                    if "friend_care.enabled" in self.setting_vars:
+                        self.setting_vars["friend_care.enabled"][0].set(True)
+                    self._reload_friend_care_targets()
+                    self.friend_care_add_button.configure(state=tk.NORMAL)
+                    self.friend_care_status_var.set(
+                        f"已加入 {target['name']}（QQ {target['uin']}）；"
+                        f"当前体力 {values.hunger:.1f}/100，自动照顾已启用"
+                    )
+                    self._append_log(
+                        f"[{datetime.now():%H:%M:%S}] 已加入自动照顾名单："
+                        f"{target['name']}（QQ {target['uin']}），"
+                        f"petId={target['pet_id']}，当前体力 {values.hunger:.1f}"
+                    )
+                elif kind == "friend_care_target_error":
+                    self.friend_care_add_button.configure(state=tk.NORMAL)
+                    self.friend_care_status_var.set(f"加入照顾名单失败：{payload}")
+                    self._append_log(
+                        f"[{datetime.now():%H:%M:%S}] 加入好友照顾名单失败：{payload}"
                     )
                 elif kind == "manual_pk_resolved":
                     opponent = payload
