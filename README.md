@@ -40,6 +40,7 @@ English: A PC-side QQ pet automation assistant under active validation. It reuse
 - 设置页可以刷新并固定服务器返回的冒险选项，不再使用写死的“金币/技能/气候”假路线。
 - 任务完成后按 `storyId` 结算并持久化，避免对旧任务反复结算。
 - NapCat 接口连接超时后自动进入重连状态，默认从 3 秒开始指数退避、最长等待 60 秒；恢复后继续下一轮，不会重发刚才可能已经送达的写指令。
+- 主任务连续失败达到阈值后，可发送 Windows Toast，并通过 OnePush 分发到 Bark、PushPlus、Server酱、SMTP 和自定义 webhook；包含重复告警冷却与恢复通知。
 
 ## 当前限制
 

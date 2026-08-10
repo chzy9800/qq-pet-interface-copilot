@@ -31,6 +31,26 @@ from qqpet_app.scheduler import Scheduler
 
 
 class ProgressAndSchedulerTests(unittest.TestCase):
+    def test_failure_alert_threshold_and_recovery_are_deduplicated(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["notifications"].update(
+                {"enabled": True, "failure_threshold": 2, "cooldown_seconds": 3600, "send_recovery": True}
+            )
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            sent = []
+            scheduler._send_notification_async = lambda title, content, event: sent.append((title, content, event))
+            scheduler._record_failure("first")
+            self.assertEqual(sent, [])
+            scheduler._record_failure("second")
+            scheduler._record_failure("third")
+            self.assertEqual([item[2] for item in sent], ["failure"])
+            scheduler._record_success()
+            self.assertEqual([item[2] for item in sent], ["failure", "recovery"])
+
     def test_reconnect_uses_backoff_and_resumes_after_login_probe(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

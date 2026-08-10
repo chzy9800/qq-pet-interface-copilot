@@ -80,6 +80,18 @@
     "settle_retry_seconds": 60,
     "auto_settle_when_end_time_reached": true
   },
+  "notifications": {
+    "enabled": false,
+    "failure_threshold": 3,
+    "cooldown_seconds": 1800,
+    "send_recovery": true,
+    "windows_toast": true,
+    "bark": {"enabled": false, "device_key": "", "base_url": "https://api.day.app"},
+    "pushplus": {"enabled": false, "token": "", "topic": ""},
+    "serverchan": {"enabled": false, "sendkey": ""},
+    "smtp": {"enabled": false, "host": "", "port": 465, "user": "", "password": "", "from": "", "to": "", "ssl": true, "starttls": false},
+    "webhook": {"enabled": false, "url": ""}
+  },
   "safety": {
     "safe_mode": true,
     "allow_experimental_scene_actions": false

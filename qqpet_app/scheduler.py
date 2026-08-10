@@ -11,6 +11,7 @@ from .config import ConfigStore
 from .friend_visits import FriendVisitProgress, eligible_friends, parse_uin_list
 from .pk_progress import PKProgress
 from .progress import DailyProgress
+from .notifications import NotificationManager
 
 
 LogCallback = Callable[[str], None]
@@ -40,6 +41,9 @@ class Scheduler:
         self._pk_candidate_cache: tuple[PKOpponent, ...] = ()
         self._pk_candidate_cache_until = 0.0
         self._pk_candidate_error_until = 0.0
+        self._consecutive_failures = 0
+        self._last_alert_at = 0.0
+        self._failure_alerted = False
 
     @staticmethod
     def _make_client(config: dict) -> NapCatClient:
@@ -670,14 +674,17 @@ class Scheduler:
         while not self._stop.is_set():
             try:
                 self.run_once()
+                self._record_success()
             except QQPetError as exc:
                 self.activity("接口连接异常，正在自动重连")
                 self.log(f"接口错误：{exc}")
+                self._record_failure(f"接口错误：{exc}")
                 if self._reconnect_until_ready():
                     continue
             except Exception as exc:  # 保证后台循环不会因单轮配置错误退出
                 self.activity("本轮执行失败，等待重试")
                 self.log(f"本轮失败：{type(exc).__name__}: {exc}")
+                self._record_failure(f"{type(exc).__name__}: {exc}")
             interval = max(3.0, float(self.config_store.data["scheduler"]["interval_seconds"]))
             self._stop.wait(interval)
         self.activity("自动控制已停止")
@@ -704,13 +711,55 @@ class Scheduler:
                 uin = client.check_connection()
             except QQPetError as exc:
                 self.log(f"自动重连尚未成功：{exc}")
+                self._record_failure(f"自动重连失败：{exc}")
                 delay = min(maximum, delay * 2)
                 continue
             except Exception as exc:
                 self.log(f"自动重连探测失败：{type(exc).__name__}: {exc}")
+                self._record_failure(f"自动重连探测失败：{type(exc).__name__}: {exc}")
                 delay = min(maximum, delay * 2)
                 continue
             self.activity("接口连接已恢复，继续自动控制")
             self.log(f"NapCat 登录会话已恢复：QQ {uin}；将从下一轮继续，不重发超时指令")
+            self._record_success()
             return True
         return False
+
+    def _record_failure(self, detail: str) -> None:
+        self._consecutive_failures += 1
+        cfg = self.config_store.data.get("notifications", {})
+        if not cfg.get("enabled", False):
+            return
+        threshold = max(1, int(cfg.get("failure_threshold", 3)))
+        now = time.monotonic()
+        cooldown = max(0.0, float(cfg.get("cooldown_seconds", 1800)))
+        if self._consecutive_failures < threshold or now - self._last_alert_at < cooldown:
+            return
+        content = f"主任务已连续失败 {self._consecutive_failures} 次。\n最后错误：{detail}"
+        self._last_alert_at = now
+        self._failure_alerted = True
+        self._send_notification_async("QQ 宠物助手任务失败", content, "failure")
+
+    def _record_success(self) -> None:
+        if not self._consecutive_failures:
+            return
+        failures = self._consecutive_failures
+        self._consecutive_failures = 0
+        cfg = self.config_store.data.get("notifications", {})
+        if self._failure_alerted and cfg.get("enabled") and cfg.get("send_recovery", True):
+            self._send_notification_async(
+                "QQ 宠物助手已恢复", f"主任务在连续失败 {failures} 次后恢复正常。", "recovery"
+            )
+        self._failure_alerted = False
+
+    def _send_notification_async(self, title: str, content: str, event: str) -> None:
+        config = self.config_store.data
+
+        def worker() -> None:
+            results = NotificationManager(config).send(title, content, event)
+            summary = "，".join(
+                f"{item.channel}:{'成功' if item.succeeded else '失败'}" for item in results
+            )
+            self.log(f"通知发送结果：{summary or '未启用具体渠道'}")
+
+        threading.Thread(target=worker, daemon=True, name="qqpet-notification").start()

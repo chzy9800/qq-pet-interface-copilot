@@ -88,6 +88,18 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "settle_retry_seconds": 60,
         "auto_settle_when_end_time_reached": True,
     },
+    "notifications": {
+        "enabled": False,
+        "failure_threshold": 3,
+        "cooldown_seconds": 1800,
+        "send_recovery": True,
+        "windows_toast": True,
+        "bark": {"enabled": False, "device_key": "", "base_url": "https://api.day.app"},
+        "pushplus": {"enabled": False, "token": "", "topic": ""},
+        "serverchan": {"enabled": False, "sendkey": ""},
+        "smtp": {"enabled": False, "host": "", "port": 465, "user": "", "password": "", "from": "", "to": "", "ssl": True, "starttls": False},
+        "webhook": {"enabled": False, "url": ""},
+    },
     "safety": {
         "safe_mode": True,
         "allow_experimental_scene_actions": False,
@@ -222,3 +234,7 @@ class ConfigStore:
             raise ValueError("care.food_purchase_count 必须大于 0")
         if int(config["care"]["soap_purchase_count"]) <= 0:
             raise ValueError("care.soap_purchase_count 必须大于 0")
+        if int(config["notifications"]["failure_threshold"]) <= 0:
+            raise ValueError("notifications.failure_threshold 必须大于 0")
+        if float(config["notifications"]["cooldown_seconds"]) < 0:
+            raise ValueError("notifications.cooldown_seconds 不能小于 0")
