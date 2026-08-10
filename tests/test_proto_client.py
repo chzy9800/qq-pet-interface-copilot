@@ -8,9 +8,11 @@ from qqpet_app.client import (
     OidbResponse,
     PageRules,
     PKOpponent,
+    PKPower,
     PKResult,
     PetValues,
     QQPetError,
+    QQFriend,
     SchoolCourse,
     StoryStatus,
     WorkJob,
@@ -33,6 +35,47 @@ def oidb_response(command: int, sub: int, body: bytes) -> dict:
 
 
 class ProtoAndClientTests(unittest.TestCase):
+    def test_resolve_pk_opponent_merges_qq_remark_pet_id_and_live_power(self) -> None:
+        client = NapCatClient("http://unused", "token", "self-pet")
+        client.query_pk_friend_candidates = lambda: (
+            PKOpponent("10001", "friend-pet", "原昵称", "宠物甲", 80, 2, 0),
+        )
+        client.query_friend_list = lambda: (
+            QQFriend("10001", nickname="好友甲", remark="常用对手"),
+        )
+        client.query_pk_power = lambda pet_id="": PKPower(pet_id, 123, 3, b"raw")
+
+        resolved = client.resolve_pk_opponent("10001")
+        self.assertEqual(resolved.user_id, "10001")
+        self.assertEqual(resolved.pet_id, "friend-pet")
+        self.assertEqual(resolved.nickname, "常用对手")
+        self.assertEqual(resolved.pet_name, "宠物甲")
+        self.assertEqual(resolved.power, 123)
+
+    def test_resolve_pk_opponent_rejects_friend_without_server_pet(self) -> None:
+        client = NapCatClient("http://unused", "token", "self-pet")
+        client.query_pk_friend_candidates = lambda: ()
+        with self.assertRaisesRegex(QQPetError, "未出现在服务器宠物好友列表"):
+            client.resolve_pk_opponent("10001")
+
+    def test_resolve_pk_opponent_uses_configured_fallback_when_pool_is_empty(self) -> None:
+        client = NapCatClient("http://unused", "token", "self-pet")
+
+        def unavailable():
+            raise QQPetError("好友宠物池返回空响应")
+
+        client.query_pk_friend_candidates = unavailable
+        client.query_friend_list = lambda: (
+            QQFriend("10001", nickname="好友甲", remark="备用好友"),
+        )
+        client.query_pk_power = lambda pet_id="": PKPower(pet_id, 77, 1, b"raw")
+        fallback = PKOpponent("10001", "known-pet", "旧备注", "", 10, 0, 0)
+
+        resolved = client.resolve_pk_opponent("10001", fallback)
+        self.assertEqual(resolved.pet_id, "known-pet")
+        self.assertEqual(resolved.nickname, "备用好友")
+        self.assertEqual(resolved.power, 77)
+
     def test_connection_check_requires_logged_in_session(self) -> None:
         client = NapCatClient("http://unused", "token", "pet")
         calls = []

@@ -473,6 +473,48 @@ class NapCatClient:
             cursor = next_cursor
         return tuple(opponents)
 
+    def resolve_pk_opponent(
+        self, opponent_uin: str, fallback: PKOpponent | None = None
+    ) -> PKOpponent:
+        """Resolve one QQ friend to a real pet ID and current PK power."""
+        target_uin = str(opponent_uin).strip()
+        if not target_uin.isdigit():
+            raise QQPetError("对手 QQ 号必须是数字")
+        if fallback is not None and fallback.user_id != target_uin:
+            fallback = None
+        try:
+            candidates = self.query_pk_friend_candidates()
+        except QQPetError:
+            if fallback is None or not fallback.pet_id:
+                raise
+            candidates = ()
+        opponent = next(
+            (item for item in candidates if item.user_id == target_uin),
+            fallback,
+        )
+        if opponent is None:
+            raise QQPetError(f"好友 {target_uin} 未出现在服务器宠物好友列表中")
+        try:
+            friends = self.query_friend_list()
+        except QQPetError:
+            friends = ()
+        friend = next((item for item in friends if item.user_id == target_uin), None)
+        display_name = (
+            (friend.remark or friend.nickname)
+            if friend is not None
+            else opponent.nickname
+        )
+        latest_power = self.query_pk_power(opponent.pet_id)
+        return PKOpponent(
+            user_id=opponent.user_id,
+            pet_id=opponent.pet_id,
+            nickname=display_name or opponent.nickname,
+            pet_name=opponent.pet_name,
+            power=latest_power.power or opponent.power,
+            dominant_type=latest_power.dominant_type or opponent.dominant_type,
+            pet_status=opponent.pet_status,
+        )
+
     def send_oidb(self, command_name: str, command: int, sub_command: int, body: bytes) -> OidbResponse:
         request = oidb_request(command, sub_command, body)
         result = (self._transport or self._http_transport)(command_name, request.hex())

@@ -9,7 +9,7 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any
 
-from qqpet_app.client import NapCatClient
+from qqpet_app.client import NapCatClient, PKOpponent
 from qqpet_app.config import ConfigStore
 from qqpet_app.friend_visits import FriendVisitProgress, eligible_friends
 from qqpet_app.scheduler import Scheduler
@@ -151,6 +151,14 @@ class MainWindow(tk.Tk):
         self.adventure_options: dict[str, str] = {
             "自动选择服务器当前可用冒险": ""
         }
+        self.manual_pk_friend_var = tk.StringVar(value="请先刷新好友")
+        self.manual_pk_uin_var = tk.StringVar()
+        self.manual_pk_pet_id_var = tk.StringVar()
+        self.manual_pk_name_var = tk.StringVar()
+        self.manual_pk_power_var = tk.StringVar(value="--")
+        self.manual_pk_status_var = tk.StringVar(value="请选择好友或输入 QQ 号")
+        self.manual_pk_friend_uins: dict[str, str] = {}
+        self.manual_pk_cached_opponents: dict[str, PKOpponent] = {}
         self.status_vars = {
             key: tk.StringVar(value="--")
             for key in (
@@ -163,6 +171,7 @@ class MainWindow(tk.Tk):
         self.after(500, self._refresh_school_courses)
         self.after(700, self._refresh_work_jobs)
         self.after(900, self._refresh_adventure_options)
+        self.after(1100, self._refresh_manual_pk_friends)
         self.after(100, self._drain_events)
         if auto_start:
             self.after(250, self._start)
@@ -218,8 +227,10 @@ class MainWindow(tk.Tk):
         notebook = ttk.Notebook(right)
         notebook.pack(fill=tk.BOTH, expand=True)
         log_page = ttk.Frame(notebook, padding=10)
+        manual_pk_page = ttk.Frame(notebook, padding=16)
         settings_page = ttk.Frame(notebook, padding=10)
         notebook.add(log_page, text="运行日志")
+        notebook.add(manual_pk_page, text="PK 好友")
         notebook.add(settings_page, text="设置")
 
         self.log_text = tk.Text(log_page, wrap=tk.WORD, state=tk.DISABLED, font=("Consolas", 10))
@@ -227,6 +238,8 @@ class MainWindow(tk.Tk):
         self.log_text.configure(yscrollcommand=log_scroll.set)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._build_manual_pk_page(manual_pk_page)
 
         canvas = tk.Canvas(settings_page, highlightthickness=0)
         scroll = ttk.Scrollbar(settings_page, orient=tk.VERTICAL, command=canvas.yview)
@@ -342,6 +355,80 @@ class MainWindow(tk.Tk):
         ttk.Label(frame, text=title, width=10).pack(side=tk.LEFT)
         style = "Title.TLabel" if small else "Value.TLabel"
         ttk.Label(frame, textvariable=self.status_vars[key], style=style).pack(side=tk.RIGHT)
+
+    def _build_manual_pk_page(self, parent: ttk.Frame) -> None:
+        ttk.Label(parent, text="手动 PK 专区", style="Title.TLabel").grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 14)
+        )
+        ttk.Label(
+            parent,
+            text="与自动 PK 独立：手动执行不会写入自动 PK 每日轮换次数。",
+            foreground="#666",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
+
+        ttk.Label(parent, text="选择 QQ 好友").grid(row=2, column=0, sticky="w", pady=6)
+        self.manual_pk_friend_combo = ttk.Combobox(
+            parent,
+            textvariable=self.manual_pk_friend_var,
+            state="readonly",
+            width=42,
+        )
+        self.manual_pk_friend_combo.grid(row=2, column=1, sticky="ew", padx=8, pady=6)
+        self.manual_pk_friend_combo.bind(
+            "<<ComboboxSelected>>", self._manual_pk_friend_selected
+        )
+        self.manual_pk_refresh_button = ttk.Button(
+            parent, text="刷新好友", command=self._refresh_manual_pk_friends
+        )
+        self.manual_pk_refresh_button.grid(row=2, column=2, sticky="ew", pady=6)
+
+        fields = (
+            ("QQ 名/备注", self.manual_pk_name_var, True),
+            ("QQ 账号", self.manual_pk_uin_var, False),
+            ("宠物 ID", self.manual_pk_pet_id_var, True),
+            ("对手战力", self.manual_pk_power_var, True),
+        )
+        for row, (label, variable, readonly) in enumerate(fields, start=3):
+            ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6)
+            entry = ttk.Entry(parent, textvariable=variable, width=44)
+            if readonly:
+                entry.configure(state="readonly")
+            entry.grid(row=row, column=1, columnspan=2, sticky="ew", padx=8, pady=6)
+
+        button_row = 3 + len(fields)
+        self.manual_pk_lookup_button = ttk.Button(
+            parent, text="按 QQ 检索宠物资料", command=self._lookup_manual_pk_opponent
+        )
+        self.manual_pk_lookup_button.grid(
+            row=button_row, column=0, columnspan=3, sticky="ew", pady=(14, 6)
+        )
+        self.manual_pk_run_button = ttk.Button(
+            parent, text="立即 PK 一次", command=self._run_manual_pk
+        )
+        self.manual_pk_run_button.grid(
+            row=button_row + 1, column=0, columnspan=3, sticky="ew", pady=6
+        )
+        ttk.Label(
+            parent,
+            textvariable=self.manual_pk_status_var,
+            foreground="#555",
+            wraplength=520,
+        ).grid(row=button_row + 2, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        parent.columnconfigure(1, weight=1)
+
+    @staticmethod
+    def _configured_pk_opponent(config: dict) -> PKOpponent | None:
+        pk = config["pk"]
+        uin = str(pk.get("opponent_uin", "")).strip()
+        pet_id = str(pk.get("opponent_pet_id", "")).strip()
+        if not uin or not pet_id:
+            return None
+        return PKOpponent(
+            user_id=uin,
+            pet_id=pet_id,
+            nickname=str(pk.get("opponent_name", "")),
+            power=int(pk.get("opponent_power", 0)),
+        )
 
     def _load_settings(self) -> None:
         config = self.config_store.data
@@ -512,6 +599,129 @@ class MainWindow(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _refresh_manual_pk_friends(self) -> None:
+        self.manual_pk_refresh_button.configure(state=tk.DISABLED)
+        self.manual_pk_lookup_button.configure(state=tk.DISABLED)
+        self.manual_pk_status_var.set("正在读取 QQ 好友和宠物资料…")
+
+        def worker() -> None:
+            try:
+                config = self.config_store.data
+                client = NapCatClient(
+                    config["napcat"]["url"],
+                    config["napcat"]["token"],
+                    config["account"]["pet_id"],
+                    float(config["napcat"]["timeout_seconds"]),
+                )
+                friends = client.query_friend_list()
+                pool_error = ""
+                try:
+                    opponents = client.query_pk_friend_candidates()
+                except Exception as exc:
+                    opponents = ()
+                    pool_error = str(exc)
+                fallback = self._configured_pk_opponent(config)
+                if fallback and all(item.user_id != fallback.user_id for item in opponents):
+                    opponents = (*opponents, fallback)
+                self.events.put(("manual_pk_friends", (friends, opponents, pool_error)))
+            except Exception as exc:
+                self.events.put(("manual_pk_friends_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _manual_pk_friend_selected(self, _event=None) -> None:
+        label = self.manual_pk_friend_var.get()
+        uin = self.manual_pk_friend_uins.get(label, "")
+        if not uin:
+            return
+        self.manual_pk_uin_var.set(uin)
+        cached = self.manual_pk_cached_opponents.get(uin)
+        if cached:
+            self.manual_pk_name_var.set(cached.nickname or cached.pet_name)
+            self.manual_pk_pet_id_var.set(cached.pet_id)
+            self.manual_pk_power_var.set(str(cached.power or "--"))
+        else:
+            self.manual_pk_name_var.set(label.split("｜", 1)[0])
+            self.manual_pk_pet_id_var.set("")
+            self.manual_pk_power_var.set("--")
+        self._lookup_manual_pk_opponent()
+
+    def _lookup_manual_pk_opponent(self) -> None:
+        uin = self.manual_pk_uin_var.get().strip()
+        if not uin.isdigit():
+            messagebox.showerror("无法检索", "请输入有效的对手 QQ 号", parent=self)
+            return
+        self.manual_pk_lookup_button.configure(state=tk.DISABLED)
+        self.manual_pk_run_button.configure(state=tk.DISABLED)
+        self.manual_pk_status_var.set(f"正在从服务器检索 QQ {uin} 的宠物 ID 和战力…")
+
+        def worker() -> None:
+            try:
+                config = self.config_store.data
+                client = NapCatClient(
+                    config["napcat"]["url"],
+                    config["napcat"]["token"],
+                    config["account"]["pet_id"],
+                    float(config["napcat"]["timeout_seconds"]),
+                )
+                opponent = client.resolve_pk_opponent(
+                    uin, self._configured_pk_opponent(config)
+                )
+                self.events.put(("manual_pk_resolved", opponent))
+            except Exception as exc:
+                self.events.put(("manual_pk_resolve_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_manual_pk(self) -> None:
+        uin = self.manual_pk_uin_var.get().strip()
+        pet_id = self.manual_pk_pet_id_var.get().strip()
+        if not uin.isdigit() or not pet_id:
+            messagebox.showerror(
+                "无法开始 PK", "请先选择好友并成功检索宠物资料", parent=self
+            )
+            return
+        self.manual_pk_run_button.configure(state=tk.DISABLED)
+        self.manual_pk_lookup_button.configure(state=tk.DISABLED)
+        self.manual_pk_refresh_button.configure(state=tk.DISABLED)
+        self.manual_pk_status_var.set("正在手动 PK，服务器结算验证约需 9 秒…")
+        self._append_log(
+            f"[{datetime.now():%H:%M:%S}] 手动 PK 已开始："
+            f"{self.manual_pk_name_var.get() or uin}（QQ {uin}）"
+        )
+
+        def worker() -> None:
+            try:
+                config = self.config_store.data
+                if config["safety"]["safe_mode"]:
+                    raise RuntimeError("安全模式已开启，请先在设置中关闭后再手动 PK")
+                client = NapCatClient(
+                    config["napcat"]["url"],
+                    config["napcat"]["token"],
+                    config["account"]["pet_id"],
+                    float(config["napcat"]["timeout_seconds"]),
+                )
+                opponent = client.resolve_pk_opponent(
+                    uin, self._configured_pk_opponent(config)
+                )
+                if opponent.pet_id != pet_id:
+                    raise RuntimeError("对手宠物 ID 已变化，请重新检索后再 PK")
+                story = client.query_story()
+                if story.story_id and story.remaining_seconds > 0:
+                    raise RuntimeError(
+                        f"当前还有任务进行中（剩余 {story.remaining_seconds} 秒），暂不能手动 PK"
+                    )
+                result = client.perform_pk(
+                    opponent.user_id,
+                    opponent.pet_id,
+                    float(config["pk"].get("wait_seconds", 9)),
+                )
+                self.events.put(("manual_pk_done", (opponent, result)))
+            except Exception as exc:
+                self.events.put(("manual_pk_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _run_friend_visits_once(self) -> None:
         self.friend_visit_button.configure(state=tk.DISABLED)
         self.events.put(("log", f"[{datetime.now():%H:%M:%S}] 正在读取 QQ 好友列表"))
@@ -616,6 +826,122 @@ class MainWindow(tk.Tk):
                         f"[{datetime.now():%H:%M:%S}] 好友访问准备失败：{payload}"
                     )
                     self.friend_visit_button.configure(state=tk.NORMAL)
+                elif kind == "manual_pk_friends":
+                    friends, opponents, pool_error = payload
+                    opponent_by_uin = {item.user_id: item for item in opponents}
+                    self.manual_pk_cached_opponents = opponent_by_uin
+                    configured_uin = str(
+                        self.config_store.data["pk"].get("opponent_uin", "")
+                    )
+                    options: list[str] = []
+                    uins: dict[str, str] = {}
+                    for friend in friends:
+                        display = friend.remark or friend.nickname or friend.user_id
+                        if pool_error and friend.user_id == configured_uin:
+                            pet_mark = "备用固定对手"
+                        else:
+                            pet_mark = "有宠物" if friend.user_id in opponent_by_uin else "未检索到宠物"
+                        label = f"{display}｜QQ {friend.user_id}｜{pet_mark}"
+                        options.append(label)
+                        uins[label] = friend.user_id
+                    if configured_uin and configured_uin not in uins.values():
+                        fallback = opponent_by_uin.get(configured_uin)
+                        if fallback:
+                            display = fallback.nickname or configured_uin
+                            label = f"{display}｜QQ {configured_uin}｜备用固定对手"
+                            options.append(label)
+                            uins[label] = configured_uin
+                    options.sort(key=str.casefold)
+                    self.manual_pk_friend_uins = uins
+                    self.manual_pk_friend_combo.configure(values=tuple(options))
+                    selected = next(
+                        (label for label in options if uins[label] == configured_uin),
+                        "请选择好友" if options else "未读取到 QQ 好友",
+                    )
+                    self.manual_pk_friend_var.set(selected)
+                    if pool_error:
+                        self.manual_pk_status_var.set(
+                            "服务器宠物好友池当前不可用；已加载备用固定对手，"
+                            "其他好友可稍后重新刷新"
+                        )
+                    else:
+                        self.manual_pk_status_var.set(
+                            f"已读取 {len(friends)} 位 QQ 好友，其中 {len(opponents)} 位返回宠物资料"
+                        )
+                    self.manual_pk_refresh_button.configure(state=tk.NORMAL)
+                    self.manual_pk_lookup_button.configure(state=tk.NORMAL)
+                    if selected in uins:
+                        self._manual_pk_friend_selected()
+                elif kind == "manual_pk_friends_error":
+                    self.manual_pk_status_var.set(f"好友读取失败：{payload}")
+                    self.manual_pk_refresh_button.configure(state=tk.NORMAL)
+                    self.manual_pk_lookup_button.configure(state=tk.NORMAL)
+                    self._append_log(
+                        f"[{datetime.now():%H:%M:%S}] 手动 PK 好友读取失败：{payload}"
+                    )
+                elif kind == "manual_pk_resolved":
+                    opponent = payload
+                    self.manual_pk_uin_var.set(opponent.user_id)
+                    self.manual_pk_pet_id_var.set(opponent.pet_id)
+                    self.manual_pk_name_var.set(
+                        opponent.nickname or opponent.pet_name or opponent.user_id
+                    )
+                    self.manual_pk_power_var.set(str(opponent.power))
+                    self.manual_pk_cached_opponents[opponent.user_id] = opponent
+                    config = self.config_store.data
+                    config["pk"]["opponent_uin"] = opponent.user_id
+                    config["pk"]["opponent_pet_id"] = opponent.pet_id
+                    config["pk"]["opponent_name"] = (
+                        opponent.nickname or opponent.pet_name
+                    )
+                    config["pk"]["opponent_power"] = opponent.power
+                    self.config_store.save(config)
+                    self.manual_pk_status_var.set(
+                        f"检索成功：{opponent.pet_name or '宠物'}，战力 {opponent.power}；"
+                        "已保存为备用固定对手"
+                    )
+                    self.manual_pk_lookup_button.configure(state=tk.NORMAL)
+                    self.manual_pk_run_button.configure(state=tk.NORMAL)
+                    self.manual_pk_refresh_button.configure(state=tk.NORMAL)
+                    self._append_log(
+                        f"[{datetime.now():%H:%M:%S}] 手动 PK 对手已解析："
+                        f"{opponent.nickname or opponent.user_id}，QQ {opponent.user_id}，"
+                        f"petId={opponent.pet_id}，战力 {opponent.power}"
+                    )
+                elif kind == "manual_pk_resolve_error":
+                    self.manual_pk_pet_id_var.set("")
+                    self.manual_pk_power_var.set("--")
+                    self.manual_pk_status_var.set(f"宠物资料检索失败：{payload}")
+                    self.manual_pk_lookup_button.configure(state=tk.NORMAL)
+                    self.manual_pk_run_button.configure(state=tk.DISABLED)
+                    self.manual_pk_refresh_button.configure(state=tk.NORMAL)
+                    self._append_log(
+                        f"[{datetime.now():%H:%M:%S}] 手动 PK 对手检索失败：{payload}"
+                    )
+                elif kind == "manual_pk_done":
+                    opponent, result = payload
+                    self.manual_pk_status_var.set(
+                        f"手动 PK 成功：{opponent.nickname or opponent.user_id}；"
+                        f"金币 {result.gold_delta:+.0f}，心情 {result.mood_delta:+.0f}，"
+                        f"体力 -{result.hunger_cost:.0f}，清洁 -{result.clean_cost:.0f}"
+                    )
+                    self._append_log(
+                        f"[{datetime.now():%H:%M:%S}] 手动 PK 已由服务器验证："
+                        f"QQ {opponent.user_id}，storyId={result.story_id}，"
+                        f"金币 {result.gold_delta:+.0f}，心情 {result.mood_delta:+.0f}；"
+                        "未写入自动 PK 每日进度"
+                    )
+                    self.manual_pk_lookup_button.configure(state=tk.NORMAL)
+                    self.manual_pk_run_button.configure(state=tk.NORMAL)
+                    self.manual_pk_refresh_button.configure(state=tk.NORMAL)
+                elif kind == "manual_pk_error":
+                    self.manual_pk_status_var.set(f"手动 PK 失败：{payload}")
+                    self._append_log(
+                        f"[{datetime.now():%H:%M:%S}] 手动 PK 失败：{payload}"
+                    )
+                    self.manual_pk_lookup_button.configure(state=tk.NORMAL)
+                    self.manual_pk_run_button.configure(state=tk.NORMAL)
+                    self.manual_pk_refresh_button.configure(state=tk.NORMAL)
                 elif kind == "school_courses":
                     stage, courses = payload
                     previous = int(self.config_store.data["school"].get("course_sub_event", 0))
