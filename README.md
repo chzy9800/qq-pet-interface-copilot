@@ -66,11 +66,11 @@ English: A PC-side QQ pet automation assistant under active validation. It reuse
 
 1. 检查 NapCat 完整运行环境和本机 OneBot 接口。
 2. NapCat 未安装时，直接从官方 GitHub 下载 `NapCat.Shell.Windows.Node.zip`，核对 GitHub Release 提供的 SHA-256，并自动解压到当前用户的应用数据目录。
-3. 直接启动完整 NapCat 环境；尚未登录时等待用户扫码确认，不会再安装或弹出 NapCatQQ Desktop 管理器。
+3. 直接启动完整 NapCat 环境；尚未登录时会等待二维码 PNG 写入完整后在助手内显示，避免 Windows 图片查看器过早打开损坏文件；NapCat 提前退出时会展示退出码和启动日志，不会再安装或弹出 NapCatQQ Desktop 管理器。
 4. 从 NapCat `get_login_info` 读取当前 QQ 账号，从本机 NapCat 配置读取接口端口和令牌；若尚未配置 HTTP 服务，会仅增加一个随机令牌、仅监听 `127.0.0.1` 的本机接口。
 5. 验证宠物状态后保存本机配置并打开控制台。
 
-首次接入尚未记录的宠物时，需要输入一次 `petId`；验证通过后不会再次询问。启动器不会导出 QQ 会话，也不会把接口令牌上传到网络。
+首次接入时，启动器会通过当前电脑版 QQ 会话调用本人资料接口，直接从服务器读取并校验 `petId`，随后自动保存，不再要求手机、ADB 或手工填写。控制台的“连接与账号”设置中也提供“从服务器一键读取并保存宠物 ID”按钮。启动器不会导出 QQ 会话，也不会把接口令牌上传到网络。
 
 NapCat 与 SnowLuma 是两套并列的 QQ Bot 框架，不是前后依赖关系。本助手使用 NapCat 的 `send_packet` 能力，因此一键流程只安装所需的 NapCat 完整环境，避免两个框架同时接管同一 QQ 会话。第三方运行包不会放进本仓库或 Release，而是在用户电脑上从 NapCat 官方 Release 下载并校验。
 
