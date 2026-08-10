@@ -31,6 +31,68 @@ from qqpet_app.scheduler import Scheduler
 
 
 class ProgressAndSchedulerTests(unittest.TestCase):
+    def test_employed_recall_waits_for_best_split_and_counts_once(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["story"]["employed_recall_mode"] = "best_split"
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+
+            class FakeClient:
+                def __init__(self):
+                    self.settled = []
+
+                def settle_story(self, story_id):
+                    self.settled.append(story_id)
+                    return OidbResponse(38752, 1, 0, b"verified", b"raw")
+
+            fake = FakeClient()
+            before = StoryStatus(
+                "6500_employed", 51, remaining_seconds=76, duration_seconds=100, recallable=True
+            )
+            self.assertTrue(scheduler._handle_story(fake, config, before))
+            self.assertEqual(fake.settled, [])
+            self.assertEqual(scheduler.progress.count("employed"), 0)
+
+            at_best_split = StoryStatus(
+                "6500_employed", 51, remaining_seconds=75, duration_seconds=100, recallable=True
+            )
+            self.assertTrue(scheduler._handle_story(fake, config, at_best_split))
+            self.assertEqual(fake.settled, ["6500_employed"])
+            self.assertEqual(scheduler.progress.count("employed"), 1)
+            self.assertFalse(scheduler._handle_story(fake, config, at_best_split))
+            self.assertEqual(fake.settled, ["6500_employed"])
+            self.assertEqual(scheduler.progress.count("employed"), 1)
+
+    def test_employed_recall_immediate_does_not_wait_for_25_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["story"]["employed_recall_mode"] = "immediate"
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+
+            class FakeClient:
+                def __init__(self):
+                    self.settled = []
+
+                def settle_story(self, story_id):
+                    self.settled.append(story_id)
+                    return OidbResponse(38752, 1, 0, b"verified", b"raw")
+
+            fake = FakeClient()
+            story = StoryStatus(
+                "6500_employed", 51, remaining_seconds=99, duration_seconds=100, recallable=True
+            )
+            self.assertTrue(scheduler._handle_story(fake, config, story))
+            self.assertEqual(fake.settled, ["6500_employed"])
+            self.assertEqual(scheduler.progress.count("employed"), 1)
+
     def test_failure_alert_threshold_and_recovery_are_deduplicated(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

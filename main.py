@@ -77,6 +77,8 @@ SETTING_FIELDS = [
     ("care.soap_purchase_count", "每次购买香皂片数量", int),
     ("care.verify_delay_seconds", "照顾后验证等待（秒）", float),
     ("care.failure_cooldown_seconds", "照顾失败重试间隔（秒）", float),
+    ("story.recall_check_seconds", "被雇佣检查间隔（秒）", float),
+    ("story.employed_recall_mode", "被雇佣召回策略", str),
     ("notifications.enabled", "启用失败告警通知", bool),
     ("notifications.failure_threshold", "连续失败多少次后告警", int),
     ("notifications.cooldown_seconds", "重复告警冷却（秒）", float),
@@ -104,6 +106,13 @@ SETTING_FIELDS = [
     ("safety.safe_mode", "安全模式（只读）", bool),
     ("safety.allow_experimental_scene_actions", "允许真实学习/打工/冒险", bool),
 ]
+
+CHOICE_FIELDS = {
+    "story.employed_recall_mode": {
+        "等到 25/75（收益分成最高）": "best_split",
+        "立刻召回": "immediate",
+    },
+}
 
 
 def deep_get(data: dict, path: str) -> Any:
@@ -230,7 +239,16 @@ class MainWindow(tk.Tk):
 
         for row, (path, label, value_type) in enumerate(SETTING_FIELDS):
             ttk.Label(form, text=label).grid(row=row, column=0, sticky="w", padx=6, pady=5)
-            if value_type is bool:
+            if path in CHOICE_FIELDS:
+                variable = tk.StringVar()
+                ttk.Combobox(
+                    form,
+                    textvariable=variable,
+                    state="readonly",
+                    width=43,
+                    values=tuple(CHOICE_FIELDS[path]),
+                ).grid(row=row, column=1, sticky="ew", padx=6, pady=5)
+            elif value_type is bool:
                 variable: tk.Variable = tk.BooleanVar()
                 ttk.Checkbutton(form, variable=variable).grid(row=row, column=1, sticky="w", padx=6, pady=5)
             else:
@@ -328,7 +346,11 @@ class MainWindow(tk.Tk):
     def _load_settings(self) -> None:
         config = self.config_store.data
         for path, (variable, _value_type) in self.setting_vars.items():
-            variable.set(deep_get(config, path))
+            value = deep_get(config, path)
+            if path in CHOICE_FIELDS:
+                labels = CHOICE_FIELDS[path]
+                value = next((label for label, saved in labels.items() if saved == value), value)
+            variable.set(value)
         selected = int(config["school"].get("course_sub_event", 0))
         if selected:
             label = f"已保存课程编号 {selected}（刷新后显示名称）"
@@ -427,7 +449,12 @@ class MainWindow(tk.Tk):
         try:
             for path, (variable, value_type) in self.setting_vars.items():
                 raw = variable.get()
-                value = raw if value_type is bool else value_type(raw)
+                if path in CHOICE_FIELDS:
+                    if raw not in CHOICE_FIELDS[path]:
+                        raise ValueError(f"请选择有效的{path}")
+                    value = CHOICE_FIELDS[path][raw]
+                else:
+                    value = raw if value_type is bool else value_type(raw)
                 deep_set(config, path, value)
             selected_label = self.course_var.get()
             if selected_label not in self.course_options:

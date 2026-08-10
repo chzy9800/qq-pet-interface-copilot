@@ -84,6 +84,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "story": {
         "recall_check_seconds": 15,
+        "employed_recall_mode": "best_split",
         "start_confirm_seconds": 45,
         "settle_retry_seconds": 60,
         "auto_settle_when_end_time_reached": True,
@@ -226,6 +227,7 @@ class ConfigStore:
             ("care", "soap_purchase_count"),
             ("care", "verify_delay_seconds"),
             ("care", "failure_cooldown_seconds"),
+            ("story", "recall_check_seconds"),
             ("story", "settle_retry_seconds"),
         ):
             if float(config[section][key]) < 0:
@@ -234,6 +236,13 @@ class ConfigStore:
             raise ValueError("care.food_purchase_count 必须大于 0")
         if int(config["care"]["soap_purchase_count"]) <= 0:
             raise ValueError("care.soap_purchase_count 必须大于 0")
+        if float(config["story"]["recall_check_seconds"]) < 3:
+            raise ValueError("story.recall_check_seconds 不能小于 3 秒")
+        if config["story"].get("employed_recall_mode", "best_split") not in {
+            "best_split",
+            "immediate",
+        }:
+            raise ValueError("story.employed_recall_mode 必须是 best_split/immediate")
         if int(config["notifications"]["failure_threshold"]) <= 0:
             raise ValueError("notifications.failure_threshold 必须大于 0")
         if float(config["notifications"]["cooldown_seconds"]) < 0:

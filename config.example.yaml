@@ -76,6 +76,7 @@
   },
   "story": {
     "recall_check_seconds": 15,
+    "employed_recall_mode": "best_split",
     "start_confirm_seconds": 45,
     "settle_retry_seconds": 60,
     "auto_settle_when_end_time_reached": true

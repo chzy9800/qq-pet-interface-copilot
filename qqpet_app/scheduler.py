@@ -289,16 +289,36 @@ class Scheduler:
         state = self.progress.snapshot()
         pending = state.get("pending")
         if story.story_id:
-            if story.finished and self.progress.story_was_settled(story.story_id):
+            if self.progress.story_was_settled(story.story_id):
                 self.activity("上次任务已结算，正在准备下一项")
                 return False
             if story.recallable and not pending:
-                self.activity("正在召回被雇佣任务")
+                mode = str(config["story"].get("employed_recall_mode", "best_split"))
+                progress = (
+                    story.elapsed_seconds / story.duration_seconds
+                    if story.duration_seconds > 0
+                    else 0.0
+                )
+                if mode == "best_split" and progress < 0.25:
+                    percent = max(0.0, min(100.0, progress * 100.0))
+                    self.activity(f"被雇佣中：等待 25/75（当前 {percent:.1f}%）")
+                    self.log(
+                        f"检测到被雇佣任务，收益优先模式等待 25/75；"
+                        f"当前进度 {story.elapsed_seconds}/{story.duration_seconds}s "
+                        f"({percent:.1f}%)，storyId={story.story_id}"
+                    )
+                    return True
+                strategy = "达到 25/75" if mode == "best_split" else "立刻召回"
+                self.activity(f"正在召回被雇佣任务（{strategy}）")
                 if self._safe_or_blocked(config, "提前召回被雇佣任务"):
                     return True
                 if self._settle_and_verify(client, config, story):
-                    self.progress.increment("employed")
-                    self.log("被雇佣任务已提前召回、验证并计数")
+                    count = self.progress.increment("employed")
+                    self.activity("召回完成，已回到主调度")
+                    self.log(
+                        f"被雇佣任务已按“{strategy}”召回、服务器验证并计数；"
+                        f"今日被雇佣召回 {count} 次"
+                    )
                 return True
 
             if not pending:
@@ -685,7 +705,10 @@ class Scheduler:
                 self.activity("本轮执行失败，等待重试")
                 self.log(f"本轮失败：{type(exc).__name__}: {exc}")
                 self._record_failure(f"{type(exc).__name__}: {exc}")
-            interval = max(3.0, float(self.config_store.data["scheduler"]["interval_seconds"]))
+            config = self.config_store.data
+            interval = max(3.0, float(config["scheduler"]["interval_seconds"]))
+            recall_interval = max(3.0, float(config["story"]["recall_check_seconds"]))
+            interval = min(interval, recall_interval)
             self._stop.wait(interval)
         self.activity("自动控制已停止")
         self.log("接口调度器已停止")
