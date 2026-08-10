@@ -460,10 +460,14 @@ class MainWindow(tk.Tk):
             state="readonly",
             width=42,
         )
-        self.friend_care_friend_combo.grid(row=2, column=1, columnspan=2, sticky="ew", padx=8, pady=6)
+        self.friend_care_friend_combo.grid(row=2, column=1, sticky="ew", padx=8, pady=6)
         self.friend_care_friend_combo.bind(
             "<<ComboboxSelected>>", self._friend_care_friend_selected
         )
+        self.friend_care_refresh_button = ttk.Button(
+            parent, text="刷新 QQ 好友", command=self._refresh_manual_pk_friends
+        )
+        self.friend_care_refresh_button.grid(row=2, column=2, sticky="ew", pady=6)
         ttk.Label(parent, text="好友 QQ 账号").grid(row=3, column=0, sticky="w", pady=6)
         ttk.Entry(parent, textvariable=self.friend_care_uin_var, width=44).grid(
             row=3, column=1, columnspan=2, sticky="ew", padx=8, pady=6
@@ -738,6 +742,7 @@ class MainWindow(tk.Tk):
 
     def _refresh_manual_pk_friends(self) -> None:
         self.manual_pk_refresh_button.configure(state=tk.DISABLED)
+        self.friend_care_refresh_button.configure(state=tk.DISABLED)
         self.manual_pk_lookup_button.configure(state=tk.DISABLED)
         self.manual_pk_status_var.set("正在读取 QQ 好友和宠物资料…")
 
@@ -1017,12 +1022,14 @@ class MainWindow(tk.Tk):
                             f"已读取 {len(friends)} 位 QQ 好友，其中 {len(opponents)} 位返回宠物资料"
                         )
                     self.manual_pk_refresh_button.configure(state=tk.NORMAL)
+                    self.friend_care_refresh_button.configure(state=tk.NORMAL)
                     self.manual_pk_lookup_button.configure(state=tk.NORMAL)
                     if selected in uins:
                         self._manual_pk_friend_selected()
                 elif kind == "manual_pk_friends_error":
                     self.manual_pk_status_var.set(f"好友读取失败：{payload}")
                     self.manual_pk_refresh_button.configure(state=tk.NORMAL)
+                    self.friend_care_refresh_button.configure(state=tk.NORMAL)
                     self.manual_pk_lookup_button.configure(state=tk.NORMAL)
                     self._append_log(
                         f"[{datetime.now():%H:%M:%S}] 手动 PK 好友读取失败：{payload}"
