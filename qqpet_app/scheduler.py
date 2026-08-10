@@ -733,7 +733,9 @@ class Scheduler:
         threshold = max(1, int(cfg.get("failure_threshold", 3)))
         now = time.monotonic()
         cooldown = max(0.0, float(cfg.get("cooldown_seconds", 1800)))
-        if self._consecutive_failures < threshold or now - self._last_alert_at < cooldown:
+        if self._consecutive_failures < threshold:
+            return
+        if self._last_alert_at > 0 and now - self._last_alert_at < cooldown:
             return
         content = f"主任务已连续失败 {self._consecutive_failures} 次。\n最后错误：{detail}"
         self._last_alert_at = now
