@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -40,6 +41,25 @@ class PetValues:
     clean: float = 0.0
     total: float = 0.0
     gold: float = 0.0
+
+
+@dataclass(frozen=True)
+class QQFriend:
+    user_id: str
+    nickname: str = ""
+    remark: str = ""
+    category_id: int = 0
+
+
+@dataclass(frozen=True)
+class PKOpponent:
+    user_id: str
+    pet_id: str
+    nickname: str = ""
+    pet_name: str = ""
+    power: int = 0
+    dominant_type: int = 0
+    pet_status: int = 0
 
 
 @dataclass(frozen=True)
@@ -229,6 +249,60 @@ class AdventureStartResult:
 
 
 @dataclass(frozen=True)
+class PKPower:
+    pet_id: str
+    power: int = 0
+    dominant_type: int = 0
+    raw_body: bytes = b""
+
+
+@dataclass(frozen=True)
+class PKStartResult:
+    opponent_uin: str
+    opponent_pet_id: str
+    story_id: str = ""
+    response: OidbResponse | None = None
+
+
+@dataclass(frozen=True)
+class PKResult:
+    opponent_uin: str
+    opponent_pet_id: str
+    story_id: str
+    before: PetValues
+    after: PetValues
+    settlement: OidbResponse
+
+    @property
+    def gold_delta(self) -> float:
+        return self.after.gold - self.before.gold
+
+    @property
+    def mood_delta(self) -> float:
+        return self.after.feel - self.before.feel
+
+    @property
+    def hunger_cost(self) -> float:
+        return max(0.0, self.before.hunger - self.after.hunger)
+
+    @property
+    def clean_cost(self) -> float:
+        return max(0.0, self.before.clean - self.after.clean)
+
+    @property
+    def verified(self) -> bool:
+        return bool(
+            self.story_id
+            and (
+                self.gold_delta != 0
+                or self.mood_delta != 0
+                or self.hunger_cost > 0
+                or self.clean_cost > 0
+            )
+        )
+
+
+@dataclass(frozen=True)
 class PageRules:
     trace: str = ""
     paths: tuple[tuple[int, int, int], ...] = ()
@@ -262,6 +336,11 @@ class NapCatClient:
     WORK_START = ("OidbSvcTrpcTcp.0x975e_1", 38750, 1)
     ADVENTURE_OPTIONS = ("OidbSvcTrpcTcp.0x9ab2_1", 39602, 1)
     ADVENTURE_START = ("OidbSvcTrpcTcp.0x975e_1", 38750, 1)
+    PK_POWER = ("OidbSvcTrpcTcp.0x9ad4_1", 39636, 1)
+    PK_FRIEND_LIST = ("OidbSvcTrpcTcp.0x985d_0", 39005, 0)
+    PK_START = ("OidbSvcTrpcTcp.0x975e_1", 38750, 1)
+    PK_STATUS = ("OidbSvcTrpcTcp.0x975f_1", 38751, 1)
+    PK_SETTLE = ("OidbSvcTrpcTcp.0x9760_1", 38752, 1)
 
     SCENES = {
         "school": {
@@ -291,9 +370,12 @@ class NapCatClient:
         self._transport = transport
 
     def _http_transport(self, command: str, data_hex: str) -> dict:
-        body = json.dumps({"cmd": command, "data": data_hex}).encode("utf-8")
+        return self._onebot_action("send_packet", {"cmd": command, "data": data_hex})
+
+    def _onebot_action(self, action: str, params: dict | None = None) -> dict:
+        body = json.dumps(params or {}).encode("utf-8")
         request = urllib.request.Request(
-            f"{self.base_url}/send_packet",
+            f"{self.base_url}/{action}",
             data=body,
             method="POST",
             headers={
@@ -306,6 +388,79 @@ class NapCatClient:
                 return json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             raise QQPetError(f"无法连接本机 NapCat：{exc}") from exc
+
+    def query_friend_list(self) -> tuple[QQFriend, ...]:
+        result = self._onebot_action("get_friend_list")
+        if result.get("retcode") != 0 or result.get("status") != "ok":
+            raise QQPetError(f"NapCat 好友列表请求失败：{result}")
+        rows = result.get("data") or []
+        friends: list[QQFriend] = []
+        for row in rows:
+            if not isinstance(row, dict) or not row.get("user_id"):
+                continue
+            friends.append(
+                QQFriend(
+                    user_id=str(row["user_id"]),
+                    nickname=str(row.get("nickname") or ""),
+                    remark=str(row.get("remark") or ""),
+                    category_id=int(row.get("category_id") or 0),
+                )
+            )
+        return tuple(friends)
+
+    def query_pk_friend_candidates(
+        self, source: int = 6, max_pages: int = 20
+    ) -> tuple[PKOpponent, ...]:
+        """Return the server's pet-owning friend list used by outdoor scenes.
+
+        Source 6 is the value used by the downloaded pet play/PK module.  The
+        response is paginated and already contains the friend's UIN, petId and
+        PK power, so callers never need to manufacture a petId from a QQ UIN.
+        """
+        cursor = ""
+        opponents: list[PKOpponent] = []
+        seen: set[tuple[str, str]] = set()
+        for _ in range(max(1, int(max_pages))):
+            body = field_varint(2, int(source))
+            if cursor:
+                body = field_string(1, cursor) + body
+            response = self.send_oidb(*self.PK_FRIEND_LIST, body).body
+            root = parse_message(response)
+            for value in root.get(1, []):
+                if value.wire_type != 2:
+                    continue
+                friend = parse_message(bytes(value.value))
+                profile_raw = first_bytes(friend, 1)
+                user_raw = first_bytes(friend, 2)
+                power_raw = first_bytes(friend, 14)
+                if not profile_raw or not user_raw:
+                    continue
+                profile = parse_message(profile_raw)
+                user = parse_message(user_raw)
+                power_info = parse_message(power_raw) if power_raw else {}
+                pet_id = first_string(profile, 8)
+                user_id = str(first_varint(user, 1) or "")
+                key = (user_id, pet_id)
+                if not user_id or not pet_id or key in seen:
+                    continue
+                seen.add(key)
+                opponents.append(
+                    PKOpponent(
+                        user_id=user_id,
+                        pet_id=pet_id,
+                        nickname=first_string(user, 2),
+                        pet_name=first_string(profile, 1),
+                        power=first_varint(power_info, 4),
+                        dominant_type=first_varint(power_info, 3),
+                        pet_status=first_varint(friend, 3),
+                    )
+                )
+            next_cursor = first_string(root, 2)
+            has_more = bool(first_varint(root, 3))
+            if not has_more or not next_cursor or next_cursor == cursor:
+                break
+            cursor = next_cursor
+        return tuple(opponents)
 
     def send_oidb(self, command_name: str, command: int, sub_command: int, body: bytes) -> OidbResponse:
         request = oidb_request(command, sub_command, body)
@@ -832,6 +987,99 @@ class NapCatClient:
             hired_friend=bool(hired_user_id and hired_pet_id),
             response=response,
         )
+
+    def query_pk_power(self, pet_id: str = "") -> PKPower:
+        target_pet_id = pet_id or self.pet_id
+        body = field_string(1, target_pet_id) + field_varint(100, 2)
+        response = self.send_oidb(*self.PK_POWER, body).body
+        root = parse_message(response)
+        info_raw = first_bytes(root, 1)
+        info = parse_message(info_raw) if info_raw else {}
+        # Own-pet responses carry dominant type in field 3 and total power in
+        # field 4.  Friend responses observed on QQ 9.3.35 omit field 4 and
+        # place the displayed opponent power in field 3.
+        if info.get(4):
+            power = first_varint(info, 4)
+            dominant_type = first_varint(info, 3)
+        else:
+            power = first_varint(info, 3)
+            dominant_type = 0
+        return PKPower(target_pet_id, power, dominant_type, response)
+
+    def start_pk(
+        self,
+        opponent_uin: str,
+        opponent_pet_id: str,
+    ) -> PKStartResult:
+        if not opponent_uin or not opponent_pet_id:
+            raise QQPetError("自动 PK 必须同时提供对手 QQ 和宠物 ID")
+        opponent = (
+            field_string(1, opponent_pet_id)
+            + field_string(2, opponent_uin)
+        )
+        # Captured from pet_pk 1.0.713 / Android QQ 9.3.35.  Page 6900 is
+        # PK, 6901 is the direct battle event and 75 is the no-bodyguard mode.
+        body = (
+            field_varint(1, 6900)
+            + field_string(2, self.pet_id)
+            + field_bytes(4, opponent)
+            + field_bytes(6, field_varint(10, 75))
+            + field_varint(7, 6901)
+            + field_varint(100, 2)
+        )
+        response = self.send_oidb(*self.PK_START, body)
+        story_id = first_string(parse_message(response.body), 1)
+        if not story_id.startswith("6900_"):
+            raise QQPetError("PK 开始接口未返回有效 storyId")
+        return PKStartResult(
+            opponent_uin=opponent_uin,
+            opponent_pet_id=opponent_pet_id,
+            story_id=story_id,
+            response=response,
+        )
+
+    def query_pk_status(self, story_id: str) -> OidbResponse:
+        body = field_string(1, story_id) + field_string(2, self.pet_id)
+        return self.send_oidb(*self.PK_STATUS, body)
+
+    def settle_pk(self, story_id: str) -> OidbResponse:
+        # PK settlement differs from long-running outdoor stories: field 2 is
+        # page 6000 and field 4 is the normal-completion source.
+        body = (
+            field_string(1, story_id)
+            + field_varint(2, 6000)
+            + field_string(3, self.pet_id)
+            + field_varint(4, 0)
+            + field_varint(100, 2)
+        )
+        return self.send_oidb(*self.PK_SETTLE, body)
+
+    def perform_pk(
+        self,
+        opponent_uin: str,
+        opponent_pet_id: str,
+        wait_seconds: float = 9.0,
+    ) -> PKResult:
+        before = self.query_values()
+        started = self.start_pk(opponent_uin, opponent_pet_id)
+        time.sleep(max(8.0, float(wait_seconds)))
+        # The desktop bridge currently returns an empty status body, which is
+        # valid for this short story.  The settlement and state delta below
+        # are the authoritative success checks.
+        self.query_pk_status(started.story_id)
+        settlement = self.settle_pk(started.story_id)
+        after = self.query_values()
+        result = PKResult(
+            opponent_uin=opponent_uin,
+            opponent_pet_id=opponent_pet_id,
+            story_id=started.story_id,
+            before=before,
+            after=after,
+            settlement=settlement,
+        )
+        if not result.verified:
+            raise QQPetError("PK 已返回结算包，但金币、心情、体力和清洁均未变化")
+        return result
 
     def start_scene(self, scene: str, option: str, rules: PageRules | None = None) -> OidbResponse:
         if scene == "school":

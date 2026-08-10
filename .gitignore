@@ -31,3 +31,11 @@ hs_err_pid*
 # Private investigation notes
 docs/pc-napcat-probe.md
 
+# Local reverse-engineering and scratch material
+hooks/
+output/
+tmp/
+scripts/
+androguard.db
+androguard.log
+add_*.py

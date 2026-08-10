@@ -40,6 +40,35 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "start_time": "20:00",
         "times_per_day": 3,
     },
+    "pk": {
+        "enabled": False,
+        "start_time": "00:00",
+        "max_per_day": 10,
+        "opponent_mode": "all_friends",
+        "friend_whitelist": "",
+        "friend_exclude": "",
+        "friend_refresh_seconds": 1800,
+        "per_friend_limit": 3,
+        "opponent_uin": "",
+        "opponent_pet_id": "",
+        "opponent_name": "",
+        "opponent_power": 0,
+        "only_weaker": True,
+        "minimum_hunger": 80,
+        "minimum_clean": 80,
+        "wait_seconds": 9,
+        "retry_cooldown_seconds": 300,
+    },
+    "friend_visits": {
+        "enabled": False,
+        "start_time": "21:00",
+        "max_per_day": 20,
+        "interval_min_seconds": 3,
+        "interval_max_seconds": 5,
+        "poke_enabled": False,
+        "whitelist": "",
+        "exclude": "",
+    },
     "care": {
         "enabled": True,
         "hunger_threshold": 80,
@@ -131,6 +160,43 @@ class ConfigStore:
         hours, minutes = map(int, str(config["adventure"]["start_time"]).split(":"))
         if not (0 <= hours <= 23 and 0 <= minutes <= 59):
             raise ValueError("adventure.start_time 必须是 HH:MM")
+        pk_hours, pk_minutes = map(int, str(config["pk"]["start_time"]).split(":"))
+        if not (0 <= pk_hours <= 23 and 0 <= pk_minutes <= 59):
+            raise ValueError("pk.start_time 必须是 HH:MM")
+        if int(config["pk"]["max_per_day"]) < 0:
+            raise ValueError("pk.max_per_day 不能小于 0")
+        if int(config["pk"].get("per_friend_limit", 3)) <= 0:
+            raise ValueError("pk.per_friend_limit 必须大于 0")
+        if config["pk"].get("opponent_mode", "fixed") not in {
+            "all_friends",
+            "fixed",
+        }:
+            raise ValueError("pk.opponent_mode 必须是 all_friends/fixed")
+        if bool(config["pk"]["opponent_uin"]) != bool(config["pk"]["opponent_pet_id"]):
+            raise ValueError("pk.opponent_uin 与 pk.opponent_pet_id 必须同时填写")
+        for key in (
+            "opponent_power",
+            "minimum_hunger",
+            "minimum_clean",
+            "wait_seconds",
+            "retry_cooldown_seconds",
+            "friend_refresh_seconds",
+        ):
+            if float(config["pk"][key]) < 0:
+                raise ValueError(f"pk.{key} 不能小于 0")
+        if float(config["pk"]["wait_seconds"]) < 8:
+            raise ValueError("pk.wait_seconds 不能小于 8 秒")
+        visit_hours, visit_minutes = map(
+            int, str(config["friend_visits"]["start_time"]).split(":")
+        )
+        if not (0 <= visit_hours <= 23 and 0 <= visit_minutes <= 59):
+            raise ValueError("friend_visits.start_time 必须是 HH:MM")
+        if int(config["friend_visits"]["max_per_day"]) < 0:
+            raise ValueError("friend_visits.max_per_day 不能小于 0")
+        minimum = float(config["friend_visits"]["interval_min_seconds"])
+        maximum = float(config["friend_visits"]["interval_max_seconds"])
+        if minimum < 1 or maximum < minimum:
+            raise ValueError("好友访问间隔必须至少 1 秒，且最大值不能小于最小值")
         for section, key in (
             ("scheduler", "interval_seconds"),
             ("care", "hunger_threshold"),

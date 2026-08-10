@@ -6,8 +6,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from .client import NapCatClient, PetValues, QQPetError, StoryStatus
+from .client import NapCatClient, PetValues, PKOpponent, QQPetError, StoryStatus
 from .config import ConfigStore
+from .friend_visits import FriendVisitProgress, eligible_friends, parse_uin_list
+from .pk_progress import PKProgress
 from .progress import DailyProgress
 
 
@@ -28,11 +30,16 @@ class Scheduler:
     ) -> None:
         self.config_store = ConfigStore(config_path)
         self.progress = DailyProgress(progress_path)
+        self.friend_progress = FriendVisitProgress(Path(progress_path).parent)
+        self.pk_progress = PKProgress(Path(progress_path).parent)
         self.log_callback = log or print
         self.status_callback = status_callback
         self.activity_callback = activity_callback
         self.client_factory = client_factory or self._make_client
         self._stop = threading.Event()
+        self._pk_candidate_cache: tuple[PKOpponent, ...] = ()
+        self._pk_candidate_cache_until = 0.0
+        self._pk_candidate_error_until = 0.0
 
     @staticmethod
     def _make_client(config: dict) -> NapCatClient:
@@ -57,7 +64,186 @@ class Scheduler:
             "work": "打工",
             "adventure": "冒险",
             "employed": "被雇佣任务",
+            "pk": "PK",
         }.get(kind or "", "任务")
+
+    def _run_pk_if_due(
+        self,
+        client: NapCatClient,
+        config: dict,
+        values: PetValues,
+        now: datetime | None = None,
+    ) -> str | None:
+        pk = config["pk"]
+        now = now or datetime.now()
+        if not pk["enabled"] or now.strftime("%H:%M") < str(pk["start_time"]):
+            return None
+        limit = int(pk["max_per_day"])
+        if limit > 0 and self.pk_progress.succeeded() >= limit:
+            return None
+        mode = str(pk.get("opponent_mode", "fixed"))
+        if mode == "fixed" and self.pk_progress.retry_blocked():
+            return None
+        if values.hunger < float(pk["minimum_hunger"]):
+            self.activity("等待体力恢复后自动 PK")
+            return None
+        if values.clean < float(pk["minimum_clean"]):
+            self.activity("等待清洁恢复后自动 PK")
+            return None
+        if self._safe_or_blocked(config, "自动 PK"):
+            self.activity("安全模式：已计划自动 PK")
+            return "pk"
+
+        self.activity("正在比较双方战力")
+        opponent_uin = ""
+        opponent_pet_id = ""
+        try:
+            self_power = client.query_pk_power().power
+            opponent = self._select_pk_opponent(client, pk, self_power, now)
+            if opponent is None:
+                self.activity("暂无可挑战的好友宠物")
+                return None
+            opponent_uin = opponent.user_id
+            opponent_pet_id = opponent.pet_id
+            queried_opponent_power = client.query_pk_power(opponent_pet_id).power
+            opponent_power = queried_opponent_power or opponent.power
+            if (
+                pk.get("only_weaker", True)
+                and self_power > 0
+                and opponent_power > 0
+                and opponent_power >= self_power
+            ):
+                self.log(
+                    f"跳过 PK：自身战力 {self_power}，对手战力 {opponent_power}，"
+                    "已开启仅挑战更弱对手"
+                )
+                return None
+
+            self.activity(
+                f"正在 PK：{opponent.nickname or opponent.pet_name or opponent_uin} "
+                f"（{self_power} 对 {opponent_power or '未知'}）"
+            )
+            result = client.perform_pk(
+                opponent_uin,
+                opponent_pet_id,
+                float(pk["wait_seconds"]),
+            )
+        except QQPetError as exc:
+            if opponent_uin and opponent_pet_id:
+                self.pk_progress.record_failure(
+                    opponent_uin,
+                    opponent_pet_id,
+                    str(exc),
+                    float(pk["retry_cooldown_seconds"]),
+                    block_all=mode == "fixed",
+                )
+            self.log(f"自动 PK 失败：{exc}；已进入重试冷却")
+            self.activity("PK 失败，等待冷却后重试")
+            return "pk_failed"
+
+        self.pk_progress.record_success(
+            result,
+            opponent.nickname or opponent.pet_name,
+            self_power,
+            opponent_power,
+        )
+        self.progress.increment("pk")
+        self.log(
+            f"PK 已由服务器验证：金币 {result.gold_delta:+.0f}，"
+            f"心情 {result.mood_delta:+.0f}，体力 -{result.hunger_cost:.0f}，"
+            f"清洁 -{result.clean_cost:.0f}，storyId={result.story_id}；"
+            f"今日成功 {self.pk_progress.succeeded()} 次"
+        )
+        self.activity("PK 结算完成，等待下一轮")
+        return "pk"
+
+    def _select_pk_opponent(
+        self,
+        client: NapCatClient,
+        pk: dict,
+        self_power: int,
+        now: datetime,
+    ) -> PKOpponent | None:
+        mode = str(pk.get("opponent_mode", "fixed"))
+        fallback = PKOpponent(
+            user_id=str(pk.get("opponent_uin", "")).strip(),
+            pet_id=str(pk.get("opponent_pet_id", "")).strip(),
+            nickname=str(pk.get("opponent_name", "")).strip(),
+            power=int(pk.get("opponent_power", 0)),
+        )
+        if mode == "fixed":
+            if not fallback.user_id or not fallback.pet_id:
+                self.log("自动 PK 已启用，但尚未填写固定对手 QQ 和 petId")
+                return None
+            return fallback
+
+        timestamp = now.timestamp()
+        if timestamp >= self._pk_candidate_cache_until and timestamp >= self._pk_candidate_error_until:
+            try:
+                self._pk_candidate_cache = client.query_pk_friend_candidates()
+                self._pk_candidate_cache_until = timestamp + float(
+                    pk.get("friend_refresh_seconds", 1800)
+                )
+                self.log(
+                    f"PK 好友池已从服务器更新：发现 {len(self._pk_candidate_cache)} 只好友宠物"
+                )
+            except QQPetError as exc:
+                self._pk_candidate_error_until = timestamp + min(
+                    300.0, float(pk.get("friend_refresh_seconds", 1800))
+                )
+                self.log(f"PK 好友池暂时无法更新：{exc}")
+
+        candidates = list(self._pk_candidate_cache)
+        if not candidates and fallback.user_id and fallback.pet_id:
+            # Keep an already verified opponent available when desktop QQ does
+            # not expose the friend-list packet, but never describe it as a
+            # successful full-friend scan.
+            candidates = [fallback]
+            self.log("本轮使用已验证的备用对手；好友宠物池尚未由电脑端返回")
+
+        whitelist = parse_uin_list(str(pk.get("friend_whitelist", "")))
+        excluded = parse_uin_list(str(pk.get("friend_exclude", "")))
+        filtered = []
+        for opponent in candidates:
+            if whitelist and opponent.user_id not in whitelist:
+                continue
+            if opponent.user_id in excluded:
+                continue
+            if self.pk_progress.opponent_retry_blocked(
+                opponent.user_id, opponent.pet_id
+            ):
+                continue
+            if (
+                pk.get("only_weaker", True)
+                and self_power > 0
+                and opponent.power > 0
+                and opponent.power >= self_power
+            ):
+                continue
+            filtered.append(opponent)
+        if not filtered:
+            return None
+
+        used = self.pk_progress.opponent_success_counts()
+        per_friend_limit = int(pk.get("per_friend_limit", 3))
+        filtered = [
+            item
+            for item in filtered
+            if used.get((item.user_id, item.pet_id), 0) < per_friend_limit
+        ]
+        if not filtered:
+            self.log(f"今日每位好友已完成 {per_friend_limit} 次 PK，等待新的可挑战好友")
+            return None
+        # Keep fighting the selected friend until that friend's quota is used,
+        # then move to the next stable candidate. A lower known power wins the
+        # tie-breaker so the sequence remains safe and deterministic.
+        filtered.sort(
+            key=lambda item: (
+                item.power if item.power > 0 else 2**31,
+                item.user_id,
+            )
+        )
+        return filtered[0]
 
     def stop(self) -> None:
         self._stop.set()
@@ -221,15 +407,55 @@ class Scheduler:
         if delay:
             self._stop.wait(delay)
 
+    def _scan_friends_if_due(
+        self, client: NapCatClient, config: dict, now: datetime | None = None
+    ) -> None:
+        visit_config = config["friend_visits"]
+        now = now or datetime.now()
+        if not visit_config["enabled"]:
+            return
+        if now.strftime("%H:%M") < str(visit_config["start_time"]):
+            return
+        if self.friend_progress.scanned():
+            return
+
+        friends = client.query_friend_list()
+        candidates = eligible_friends(
+            friends,
+            str(config["account"]["uin"]),
+            str(visit_config.get("whitelist", "")),
+            str(visit_config.get("exclude", "")),
+        )
+        limit = int(visit_config.get("max_per_day", 0))
+        if limit > 0:
+            candidates = candidates[:limit]
+        self.friend_progress.record_scan(len(friends), len(candidates))
+        self.log(
+            f"每日好友列表已读取：共 {len(friends)} 人，候选 {len(candidates)} 人；"
+            "真实访问协议未确认前不会发送访问或踩踩请求"
+        )
+
     def run_once(self) -> str | None:
         self.activity("正在检查宠物状态")
         config = self.config_store.data
         if self.progress.rollover():
             self.log("检测到新的一天，昨日次数已归档，今日计数清零")
         client = self.client_factory(config)
+        self._scan_friends_if_due(client, config)
         values = client.query_values()
         story = client.query_story()
         state = self.progress.snapshot()
+        state["friend_visit_summary"] = self.friend_progress.summary()
+        pk_summary = self.pk_progress.snapshot()
+        pk_summary["opponent_mode"] = config["pk"].get("opponent_mode", "fixed")
+        pk_summary["friend_pool_count"] = len(self._pk_candidate_cache)
+        if self._pk_candidate_cache:
+            pk_summary["friend_pool_status"] = "ready"
+        elif self._pk_candidate_error_until > datetime.now().timestamp():
+            pk_summary["friend_pool_status"] = "unavailable"
+        else:
+            pk_summary["friend_pool_status"] = "pending"
+        state["pk_summary"] = pk_summary
         inventory = client.query_food_inventory()
         state["food_inventory"] = {
             "biscuits": inventory.biscuits,
@@ -337,6 +563,10 @@ class Scheduler:
         # Care actions are allowed while a school/work/adventure story is in
         # progress.  Check them first so a long-running story cannot starve
         # feeding or washing for its entire duration.
+        pk_action = self._run_pk_if_due(client, config, values)
+        if pk_action:
+            return pk_action
+
         if self._handle_story(client, config, story):
             return "story"
 

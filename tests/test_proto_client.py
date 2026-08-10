@@ -5,7 +5,11 @@ import unittest
 from qqpet_app.client import (
     AdventureOption,
     NapCatClient,
+    OidbResponse,
     PageRules,
+    PKOpponent,
+    PKResult,
+    PetValues,
     QQPetError,
     SchoolCourse,
     StoryStatus,
@@ -29,6 +33,117 @@ def oidb_response(command: int, sub: int, body: bytes) -> dict:
 
 
 class ProtoAndClientTests(unittest.TestCase):
+    def test_pk_friend_candidates_decode_real_friend_pet_fields(self) -> None:
+        profile = field_string(1, "宠物甲") + field_string(8, "pet-10001")
+        user = field_varint(1, 10001) + field_string(2, "好友甲")
+        power = field_varint(3, 2) + field_varint(4, 99)
+        friend = (
+            field_bytes(1, profile)
+            + field_bytes(2, user)
+            + field_varint(3, 0)
+            + field_bytes(14, power)
+        )
+
+        def transport(command: str, data: str) -> dict:
+            self.assertEqual(command, "OidbSvcTrpcTcp.0x985d_0")
+            outer = parse_message(bytes.fromhex(data))
+            request = parse_message(first_bytes(outer, 4))
+            self.assertEqual(first_varint(request, 2), 6)
+            return oidb_response(
+                39005,
+                0,
+                field_bytes(1, friend) + field_varint(3, 0),
+            )
+
+        client = NapCatClient("http://unused", "token", "pet", transport=transport)
+        self.assertEqual(
+            client.query_pk_friend_candidates(),
+            (PKOpponent("10001", "pet-10001", "好友甲", "宠物甲", 99, 2, 0),),
+        )
+
+    def test_pk_power_start_and_settlement_packets_match_mobile_protocol(self) -> None:
+        calls = 0
+
+        def transport(command: str, data: str) -> dict:
+            nonlocal calls
+            calls += 1
+            outer = parse_message(bytes.fromhex(data))
+            request = parse_message(first_bytes(outer, 4))
+            if calls == 1:
+                self.assertEqual(command, "OidbSvcTrpcTcp.0x9ad4_1")
+                self.assertEqual(first_string(request, 1), "pet")
+                self.assertEqual(first_varint(request, 100), 2)
+                power = field_varint(3, 2) + field_varint(4, 1713)
+                return oidb_response(39636, 1, field_bytes(1, power))
+            if calls == 2:
+                self.assertEqual(command, "OidbSvcTrpcTcp.0x975e_1")
+                self.assertEqual(first_varint(request, 1), 6900)
+                self.assertEqual(first_string(request, 2), "pet")
+                friend = parse_message(first_bytes(request, 4))
+                self.assertEqual(first_string(friend, 1), "friend-pet")
+                self.assertEqual(first_string(friend, 2), "10001")
+                mode = parse_message(first_bytes(request, 6))
+                self.assertEqual(first_varint(mode, 10), 75)
+                self.assertEqual(first_varint(request, 7), 6901)
+                self.assertEqual(first_varint(request, 100), 2)
+                return oidb_response(38750, 1, field_string(1, "6900_story"))
+            self.assertEqual(command, "OidbSvcTrpcTcp.0x9760_1")
+            self.assertEqual(first_string(request, 1), "6900_story")
+            self.assertEqual(first_varint(request, 2), 6000)
+            self.assertEqual(first_string(request, 3), "pet")
+            self.assertEqual(first_varint(request, 4), 0)
+            self.assertEqual(first_varint(request, 100), 2)
+            return oidb_response(38752, 1, field_string(1, "verified-result"))
+
+        client = NapCatClient("http://unused", "token", "pet", transport=transport)
+        power = client.query_pk_power()
+        self.assertEqual((power.power, power.dominant_type), (1713, 2))
+        started = client.start_pk("10001", "friend-pet")
+        self.assertEqual(started.story_id, "6900_story")
+        settled = client.settle_pk(started.story_id)
+        self.assertEqual(first_string(parse_message(settled.body), 1), "verified-result")
+
+    def test_pk_result_requires_real_server_state_delta(self) -> None:
+        response = OidbResponse(38752, 1, 0, b"result", b"raw")
+        result = PKResult(
+            "10001",
+            "friend-pet",
+            "6900_story",
+            PetValues(feel=80, hunger=90, clean=90, gold=100),
+            PetValues(feel=82, hunger=85, clean=85, gold=142),
+            response,
+        )
+        self.assertTrue(result.verified)
+        self.assertEqual(result.gold_delta, 42)
+        self.assertEqual((result.hunger_cost, result.clean_cost), (5, 5))
+
+    def test_friend_list_uses_onebot_and_normalizes_fields(self) -> None:
+        client = NapCatClient("http://unused", "token", "pet")
+        calls = []
+
+        def action(name: str, params=None):
+            calls.append((name, params))
+            return {
+                "status": "ok",
+                "retcode": 0,
+                "data": [
+                    {
+                        "user_id": 12345,
+                        "nickname": "好友",
+                        "remark": "备注",
+                        "category_id": 2,
+                    },
+                    {"nickname": "缺少账号"},
+                ],
+            }
+
+        client._onebot_action = action
+        friends = client.query_friend_list()
+        self.assertEqual(calls, [("get_friend_list", None)])
+        self.assertEqual(len(friends), 1)
+        self.assertEqual(friends[0].user_id, "12345")
+        self.assertEqual(friends[0].remark, "备注")
+
     def test_wire_roundtrip(self) -> None:
         raw = field_varint(1, 12345) + field_bytes(2, b"abc")
         parsed = parse_message(raw)

@@ -11,6 +11,7 @@ from typing import Any
 
 from qqpet_app.client import NapCatClient
 from qqpet_app.config import ConfigStore
+from qqpet_app.friend_visits import FriendVisitProgress, eligible_friends
 from qqpet_app.scheduler import Scheduler
 
 
@@ -18,6 +19,7 @@ ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.yaml"
 PROGRESS_PATH = ROOT / "runs" / "daily_progress.json"
 LOG_DIR = ROOT / "runs" / "logs"
+FRIEND_VISIT_DIR = ROOT / "runs"
 
 
 SETTING_FIELDS = [
@@ -35,6 +37,29 @@ SETTING_FIELDS = [
     ("adventure.enabled", "启用冒险", bool),
     ("adventure.start_time", "冒险开始时间 HH:MM", str),
     ("adventure.times_per_day", "每日冒险上限", int),
+    ("pk.enabled", "启用自动 PK", bool),
+    ("pk.start_time", "自动 PK 开始时间 HH:MM", str),
+    ("pk.max_per_day", "每日 PK 上限（0 不限）", int),
+    ("pk.opponent_mode", "对手来源 all_friends=全部好友 / fixed=固定", str),
+    ("pk.friend_whitelist", "PK 好友白名单（空=全部）", str),
+    ("pk.friend_exclude", "PK 好友排除名单", str),
+    ("pk.friend_refresh_seconds", "PK 好友池刷新间隔（秒）", float),
+    ("pk.per_friend_limit", "每位好友连续 PK 次数", int),
+    ("pk.opponent_uin", "备用/固定对手 QQ", str),
+    ("pk.opponent_pet_id", "备用/固定对手宠物 ID", str),
+    ("pk.opponent_name", "备用/固定对手备注名", str),
+    ("pk.opponent_power", "备用/固定对手战力（0=接口读取）", int),
+    ("pk.only_weaker", "仅挑战战力低于自己的对手", bool),
+    ("pk.minimum_hunger", "PK 最低体力", float),
+    ("pk.minimum_clean", "PK 最低清洁", float),
+    ("friend_visits.enabled", "启用每日好友访问", bool),
+    ("friend_visits.start_time", "每日好友访问时间 HH:MM", str),
+    ("friend_visits.max_per_day", "每日最多访问人数（0 不限）", int),
+    ("friend_visits.interval_min_seconds", "访问最短间隔（秒）", float),
+    ("friend_visits.interval_max_seconds", "访问最长间隔（秒）", float),
+    ("friend_visits.poke_enabled", "访问成功后踩踩", bool),
+    ("friend_visits.whitelist", "好友白名单（逗号分隔，空=全部）", str),
+    ("friend_visits.exclude", "好友排除名单（逗号分隔）", str),
     ("care.enabled", "启用状态照顾", bool),
     ("care.hunger_threshold", "体力喂食阈值", float),
     ("care.clean_threshold", "清洁洗澡阈值", float),
@@ -88,7 +113,7 @@ class MainWindow(tk.Tk):
             key: tk.StringVar(value="--")
             for key in (
                 "connection", "gold", "food", "bath", "mood", "hunger",
-                "clean", "total", "story", "counts",
+                "clean", "total", "story", "counts", "pk", "friend_visits",
             )
         }
         self._build_ui()
@@ -124,6 +149,8 @@ class MainWindow(tk.Tk):
         self._status_row(left, "综合", "total")
         self._status_row(left, "当前任务", "story", small=True)
         self._status_row(left, "今日次数", "counts", small=True)
+        self._status_row(left, "自动 PK", "pk", small=True)
+        self._status_row(left, "好友访问", "friend_visits", small=True)
 
         buttons = ttk.Frame(left)
         buttons.pack(fill=tk.X, pady=(22, 0))
@@ -132,11 +159,17 @@ class MainWindow(tk.Tk):
         self.stop_button = ttk.Button(buttons, text="停止", command=self._stop, state=tk.DISABLED)
         self.stop_button.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(5, 0))
         ttk.Button(left, text="立即检查一轮", command=self._check_once).pack(fill=tk.X, pady=(10, 0))
+        self.friend_visit_button = ttk.Button(
+            left,
+            text="立即执行今日访问",
+            command=self._run_friend_visits_once,
+        )
+        self.friend_visit_button.pack(fill=tk.X, pady=(10, 0))
 
         note = (
             "接口版不需要 scrcpy、OCR 或手机坐标。\n"
             "食物和洗护库存均来自服务器；洗澡会核对清洁值。\n"
-            "学习和打工选项均从服务器实时读取，不使用固定坐标。"
+            "学习、打工和 PK 均使用服务器接口，不使用固定坐标。"
         )
         ttk.Label(left, text=note, foreground="#666", justify=tk.LEFT).pack(anchor="w", pady=(18, 0))
 
@@ -419,6 +452,40 @@ class MainWindow(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _run_friend_visits_once(self) -> None:
+        self.friend_visit_button.configure(state=tk.DISABLED)
+        self.events.put(("log", f"[{datetime.now():%H:%M:%S}] 正在读取 QQ 好友列表"))
+
+        def worker() -> None:
+            try:
+                config = self.config_store.data
+                client = NapCatClient(
+                    config["napcat"]["url"],
+                    config["napcat"]["token"],
+                    config["account"]["pet_id"],
+                    float(config["napcat"]["timeout_seconds"]),
+                )
+                friends = client.query_friend_list()
+                visit_config = config["friend_visits"]
+                candidates = eligible_friends(
+                    friends,
+                    str(config["account"]["uin"]),
+                    str(visit_config.get("whitelist", "")),
+                    str(visit_config.get("exclude", "")),
+                )
+                limit = int(visit_config.get("max_per_day", 0))
+                if limit > 0:
+                    candidates = candidates[:limit]
+                progress = FriendVisitProgress(FRIEND_VISIT_DIR)
+                progress.record_scan(len(friends), len(candidates))
+                self.events.put(
+                    ("friend_visit_scan", (len(friends), len(candidates), progress.summary()))
+                )
+            except Exception as exc:
+                self.events.put(("friend_visit_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _drain_events(self) -> None:
         try:
             while True:
@@ -444,12 +511,51 @@ class MainWindow(tk.Tk):
                     self.status_vars["total"].set(f"{values.total:.1f}")
                     counts = state["counts"]
                     self.status_vars["counts"].set(
-                        f"学{counts['school']} 工{counts['work']} 冒{counts['adventure']}"
+                        f"学{counts['school']} 工{counts['work']} "
+                        f"冒{counts['adventure']} PK{counts.get('pk', 0)}"
                     )
+                    pk_summary = state.get("pk_summary", {})
+                    pool_status = pk_summary.get("friend_pool_status")
+                    pool_text = {
+                        "ready": f"好友池 {pk_summary.get('friend_pool_count', 0)}",
+                        "unavailable": "好友池暂不可用",
+                        "pending": "好友池待刷新",
+                    }.get(pool_status, "")
+                    self.status_vars["pk"].set(
+                        f"成功 {pk_summary.get('success', 0)} / "
+                        f"失败 {pk_summary.get('failed', 0)} / "
+                        f"金币 {pk_summary.get('gold_earned', 0):.0f}"
+                        + (f" / {pool_text}" if pool_text else "")
+                    )
+                    visit_summary = state.get("friend_visit_summary", {})
+                    if visit_summary:
+                        self.status_vars["friend_visits"].set(
+                            f"成功{visit_summary.get('success', 0)} "
+                            f"无宠物{visit_summary.get('no_pet', 0)} "
+                            f"已访问{visit_summary.get('already_visited', 0)} "
+                            f"失败{visit_summary.get('failed', 0)}"
+                        )
                 elif kind == "connection":
                     self.status_vars["connection"].set(str(payload))
                 elif kind == "activity":
                     self.status_vars["story"].set(str(payload))
+                elif kind == "friend_visit_scan":
+                    total, eligible, summary = payload
+                    self.status_vars["friend_visits"].set(
+                        f"成功{summary['success']} 无宠物{summary['no_pet']} "
+                        f"已访问{summary['already_visited']} 失败{summary['failed']}"
+                    )
+                    self._append_log(
+                        f"[{datetime.now():%H:%M:%S}] 好友列表共 {total} 人，"
+                        f"本轮候选 {eligible} 人；真实访问协议尚待 Hook 样本，"
+                        "未发送访问或踩踩请求"
+                    )
+                    self.friend_visit_button.configure(state=tk.NORMAL)
+                elif kind == "friend_visit_error":
+                    self._append_log(
+                        f"[{datetime.now():%H:%M:%S}] 好友访问准备失败：{payload}"
+                    )
+                    self.friend_visit_button.configure(state=tk.NORMAL)
                 elif kind == "school_courses":
                     stage, courses = payload
                     previous = int(self.config_store.data["school"].get("course_sub_event", 0))

@@ -13,6 +13,11 @@ from qqpet_app.client import (
     FoodInventory,
     PageRules,
     PetValues,
+    OidbResponse,
+    PKPower,
+    PKOpponent,
+    PKResult,
+    QQFriend,
     SchoolCourse,
     SchoolStartResult,
     StoryStatus,
@@ -25,6 +30,175 @@ from qqpet_app.scheduler import Scheduler
 
 
 class ProgressAndSchedulerTests(unittest.TestCase):
+    def test_auto_pk_runs_once_and_persists_verified_daily_result(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["pk"].update(
+                {
+                    "enabled": True,
+                    "start_time": "00:00",
+                    "max_per_day": 1,
+                    "opponent_mode": "fixed",
+                    "opponent_uin": "10001",
+                    "opponent_pet_id": "friend-pet",
+                    "opponent_name": "弱对手",
+                    "opponent_power": 10,
+                }
+            )
+            config["school"]["enabled"] = False
+            config["work"]["enabled"] = False
+            config["adventure"]["enabled"] = False
+            config["safety"]["safe_mode"] = False
+            store.save(config)
+
+            class FakeClient:
+                runs = 0
+
+                def query_values(self):
+                    return PetValues(feel=80, gold=100, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=10, shrimp=10)
+
+                def query_pk_power(self, pet_id=""):
+                    return PKPower(pet_id or "self", 10 if pet_id else 1713)
+
+                def perform_pk(self, uin, pet_id, wait_seconds):
+                    self.runs += 1
+                    return PKResult(
+                        uin,
+                        pet_id,
+                        "6900_verified",
+                        PetValues(feel=80, gold=100, hunger=100, clean=100),
+                        PetValues(feel=82, gold=142, hunger=95, clean=95),
+                        OidbResponse(38752, 1, 0, b"result", b"raw"),
+                    )
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "pk")
+            self.assertEqual(scheduler.run_once(), None)
+            self.assertEqual(fake.runs, 1)
+            saved = scheduler.pk_progress.snapshot()
+            self.assertEqual(saved["success"], 1)
+            self.assertEqual(saved["gold_earned"], 42)
+            self.assertTrue(saved["records"][0]["verified"])
+
+    def test_auto_pk_uses_each_friend_three_times_before_switching(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["pk"].update(
+                {
+                    "enabled": True,
+                    "start_time": "00:00",
+                    "max_per_day": 4,
+                    "opponent_mode": "all_friends",
+                    "opponent_uin": "",
+                    "opponent_pet_id": "",
+                }
+            )
+            config["school"]["enabled"] = False
+            config["work"]["enabled"] = False
+            config["adventure"]["enabled"] = False
+            config["safety"]["safe_mode"] = False
+            store.save(config)
+
+            class FakeClient:
+                opponents = []
+
+                def query_values(self):
+                    return PetValues(feel=80, gold=100, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=10, shrimp=10)
+
+                def query_pk_friend_candidates(self):
+                    return (
+                        PKOpponent("10001", "pet-a", "甲", power=20),
+                        PKOpponent("10002", "pet-b", "乙", power=10),
+                    )
+
+                def query_pk_power(self, pet_id=""):
+                    powers = {"pet-a": 20, "pet-b": 10}
+                    return PKPower(pet_id or "self", powers.get(pet_id, 100))
+
+                def perform_pk(self, uin, pet_id, wait_seconds):
+                    self.opponents.append(uin)
+                    return PKResult(
+                        uin,
+                        pet_id,
+                        f"6900_{uin}",
+                        PetValues(feel=80, gold=100, hunger=100, clean=100),
+                        PetValues(feel=82, gold=142, hunger=95, clean=95),
+                        OidbResponse(38752, 1, 0, b"result", b"raw"),
+                    )
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            for _ in range(4):
+                self.assertEqual(scheduler.run_once(), "pk")
+            self.assertEqual(fake.opponents, ["10002", "10002", "10002", "10001"])
+
+    def test_daily_friend_scan_runs_once_after_configured_time(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["friend_visits"]["enabled"] = True
+            config["friend_visits"]["start_time"] = "00:00"
+            config["friend_visits"]["max_per_day"] = 1
+            store.save(config)
+
+            class FakeClient:
+                scans = 0
+
+                def query_friend_list(self):
+                    self.scans += 1
+                    return (QQFriend("10001", "甲"), QQFriend("10002", "乙"))
+
+                def query_values(self):
+                    return PetValues(gold=1000, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus(
+                        "6400_active", 51, remaining_seconds=100, duration_seconds=200
+                    )
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+
+            scheduler.run_once()
+            scheduler.run_once()
+            self.assertEqual(fake.scans, 1)
+            self.assertEqual(
+                scheduler.friend_progress.snapshot()["scan"]["eligible"], 1
+            )
+
     def test_frontend_status_includes_bath_inventory(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

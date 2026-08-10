@@ -15,6 +15,7 @@ EMPTY_COUNTS = {
     "employed": 0,
     "feed": 0,
     "wash": 0,
+    "pk": 0,
 }
 
 
