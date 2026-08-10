@@ -86,7 +86,10 @@ class MainWindow(tk.Tk):
         }
         self.status_vars = {
             key: tk.StringVar(value="--")
-            for key in ("connection", "gold", "food", "mood", "hunger", "clean", "total", "story", "counts")
+            for key in (
+                "connection", "gold", "food", "bath", "mood", "hunger",
+                "clean", "total", "story", "counts",
+            )
         }
         self._build_ui()
         self._load_settings()
@@ -114,6 +117,7 @@ class MainWindow(tk.Tk):
         self._status_row(left, "接口", "connection")
         self._status_row(left, "金币", "gold")
         self._status_row(left, "食物", "food")
+        self._status_row(left, "洗护", "bath")
         self._status_row(left, "心情", "mood")
         self._status_row(left, "体力", "hunger")
         self._status_row(left, "清洁", "clean")
@@ -131,7 +135,7 @@ class MainWindow(tk.Tk):
 
         note = (
             "接口版不需要 scrcpy、OCR 或手机坐标。\n"
-            "食物库存来自服务器：饼干/虾仁；洗澡会核对清洁值。\n"
+            "食物和洗护库存均来自服务器；洗澡会核对清洁值。\n"
             "学习和打工选项均从服务器实时读取，不使用固定坐标。"
         )
         ttk.Label(left, text=note, foreground="#666", justify=tk.LEFT).pack(anchor="w", pady=(18, 0))
@@ -428,6 +432,11 @@ class MainWindow(tk.Tk):
                     inventory = state.get("food_inventory", {})
                     self.status_vars["food"].set(
                         f"饼干 {inventory.get('biscuits', '--')} / 虾仁 {inventory.get('shrimp', '--')}"
+                    )
+                    bath_inventory = state.get("bath_inventory", {})
+                    self.status_vars["bath"].set(
+                        f"香皂片 {bath_inventory.get('soap', '--')} / "
+                        f"沐浴球 {bath_inventory.get('bath_ball', '--')}"
                     )
                     self.status_vars["mood"].set(f"{values.feel:.1f}/100")
                     self.status_vars["hunger"].set(f"{values.hunger:.1f}/100")
