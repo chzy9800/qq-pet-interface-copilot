@@ -11,6 +11,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "url": "http://127.0.0.1:6201",
         "token": "CHANGE_ME_LOCAL_TOKEN",
         "timeout_seconds": 15,
+        "auto_reconnect": True,
+        "reconnect_initial_seconds": 3,
+        "reconnect_max_seconds": 60,
     },
     "account": {
         "uin": "YOUR_QQ_UIN",
@@ -143,6 +146,12 @@ class ConfigStore:
     def _validate(config: dict[str, Any]) -> None:
         if not config["account"]["pet_id"]:
             raise ValueError("account.pet_id 不能为空")
+        if float(config["napcat"]["timeout_seconds"]) <= 0:
+            raise ValueError("napcat.timeout_seconds 必须大于 0")
+        initial = float(config["napcat"]["reconnect_initial_seconds"])
+        maximum = float(config["napcat"]["reconnect_max_seconds"])
+        if initial <= 0 or maximum < initial:
+            raise ValueError("自动重连间隔必须大于 0，且最大间隔不能小于初始间隔")
         if config["school"]["attribute"] not in {"culture", "physical", "art"}:
             raise ValueError("school.attribute 必须是 culture/physical/art")
         if int(config["school"].get("course_sub_event", 0)) < 0:

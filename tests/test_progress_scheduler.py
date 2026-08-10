@@ -17,6 +17,7 @@ from qqpet_app.client import (
     PKPower,
     PKOpponent,
     PKResult,
+    QQPetError,
     QQFriend,
     SchoolCourse,
     SchoolStartResult,
@@ -30,6 +31,34 @@ from qqpet_app.scheduler import Scheduler
 
 
 class ProgressAndSchedulerTests(unittest.TestCase):
+    def test_reconnect_uses_backoff_and_resumes_after_login_probe(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["napcat"]["reconnect_initial_seconds"] = 0.01
+            config["napcat"]["reconnect_max_seconds"] = 0.02
+            store.save(config)
+            attempts = []
+
+            class FakeClient:
+                def check_connection(self):
+                    attempts.append(1)
+                    if len(attempts) == 1:
+                        raise QQPetError("offline")
+                    return "123456"
+
+            logs = []
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                log=logs.append,
+                client_factory=lambda _config: FakeClient(),
+            )
+            self.assertTrue(scheduler._reconnect_until_ready())
+            self.assertEqual(len(attempts), 2)
+            self.assertTrue(any("登录会话已恢复" in line for line in logs))
+
     def test_auto_pk_runs_once_and_persists_verified_daily_result(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

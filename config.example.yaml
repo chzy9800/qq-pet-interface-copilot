@@ -2,7 +2,10 @@
   "napcat": {
     "url": "http://127.0.0.1:6201",
     "token": "CHANGE_ME_LOCAL_TOKEN",
-    "timeout_seconds": 15
+    "timeout_seconds": 15,
+    "auto_reconnect": true,
+    "reconnect_initial_seconds": 3,
+    "reconnect_max_seconds": 60
   },
   "account": {
     "uin": "YOUR_QQ_UIN",

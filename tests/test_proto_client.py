@@ -33,6 +33,18 @@ def oidb_response(command: int, sub: int, body: bytes) -> dict:
 
 
 class ProtoAndClientTests(unittest.TestCase):
+    def test_connection_check_requires_logged_in_session(self) -> None:
+        client = NapCatClient("http://unused", "token", "pet")
+        calls = []
+
+        def action(name: str, params=None):
+            calls.append((name, params))
+            return {"status": "ok", "retcode": 0, "data": {"user_id": 123456}}
+
+        client._onebot_action = action
+        self.assertEqual(client.check_connection(), "123456")
+        self.assertEqual(calls, [("get_login_info", None)])
+
     def test_pk_friend_candidates_decode_real_friend_pet_fields(self) -> None:
         profile = field_string(1, "宠物甲") + field_string(8, "pet-10001")
         user = field_varint(1, 10001) + field_string(2, "好友甲")

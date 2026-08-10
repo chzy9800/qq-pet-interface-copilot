@@ -671,8 +671,10 @@ class Scheduler:
             try:
                 self.run_once()
             except QQPetError as exc:
-                self.activity("接口连接异常，等待重试")
+                self.activity("接口连接异常，正在自动重连")
                 self.log(f"接口错误：{exc}")
+                if self._reconnect_until_ready():
+                    continue
             except Exception as exc:  # 保证后台循环不会因单轮配置错误退出
                 self.activity("本轮执行失败，等待重试")
                 self.log(f"本轮失败：{type(exc).__name__}: {exc}")
@@ -680,3 +682,35 @@ class Scheduler:
             self._stop.wait(interval)
         self.activity("自动控制已停止")
         self.log("接口调度器已停止")
+
+    def _reconnect_until_ready(self) -> bool:
+        """Probe the stateless OneBot HTTP endpoint without replaying a pet action."""
+        config = self.config_store.data
+        napcat = config["napcat"]
+        if not bool(napcat.get("auto_reconnect", True)):
+            self.activity("接口连接异常，自动重连未开启")
+            return False
+        delay = max(0.1, float(napcat.get("reconnect_initial_seconds", 3)))
+        while not self._stop.is_set():
+            config = self.config_store.data
+            napcat = config["napcat"]
+            maximum = max(delay, float(napcat.get("reconnect_max_seconds", 60)))
+            self.activity(f"接口已断开，{delay:g} 秒后自动重连")
+            self.log(f"等待 {delay:g} 秒后探测 NapCat 登录会话")
+            if self._stop.wait(delay):
+                return False
+            try:
+                client = self.client_factory(config)
+                uin = client.check_connection()
+            except QQPetError as exc:
+                self.log(f"自动重连尚未成功：{exc}")
+                delay = min(maximum, delay * 2)
+                continue
+            except Exception as exc:
+                self.log(f"自动重连探测失败：{type(exc).__name__}: {exc}")
+                delay = min(maximum, delay * 2)
+                continue
+            self.activity("接口连接已恢复，继续自动控制")
+            self.log(f"NapCat 登录会话已恢复：QQ {uin}；将从下一轮继续，不重发超时指令")
+            return True
+        return False

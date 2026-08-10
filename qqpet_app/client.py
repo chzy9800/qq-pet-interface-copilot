@@ -408,6 +408,17 @@ class NapCatClient:
             )
         return tuple(friends)
 
+    def check_connection(self) -> str:
+        """Verify that NapCat is reachable and has a logged-in QQ session."""
+        result = self._onebot_action("get_login_info")
+        if result.get("retcode") != 0 or result.get("status") != "ok":
+            raise QQPetError(f"NapCat 登录会话尚未就绪：{result}")
+        data = result.get("data") or {}
+        uin = str(data.get("user_id") or "")
+        if not uin.isdigit():
+            raise QQPetError("NapCat 已连接，但尚未取得有效 QQ 登录会话")
+        return uin
+
     def query_pk_friend_candidates(
         self, source: int = 6, max_pages: int = 20
     ) -> tuple[PKOpponent, ...]:

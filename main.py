@@ -30,6 +30,10 @@ FRIEND_VISIT_DIR = ROOT / "runs"
 SETTING_FIELDS = [
     ("napcat.url", "本机接口地址", str),
     ("napcat.token", "本机接口令牌", str),
+    ("napcat.timeout_seconds", "接口请求超时（秒）", float),
+    ("napcat.auto_reconnect", "接口断开后自动重连", bool),
+    ("napcat.reconnect_initial_seconds", "自动重连初始间隔（秒）", float),
+    ("napcat.reconnect_max_seconds", "自动重连最大间隔（秒）", float),
     ("account.uin", "QQ 号", str),
     ("account.pet_id", "宠物 ID", str),
     ("scheduler.interval_seconds", "轮询间隔（秒）", int),
