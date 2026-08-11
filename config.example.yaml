@@ -1,8 +1,18 @@
 {
   "napcat": {
-    "url": "http://127.0.0.1:6201",
-    "token": "CHANGE_ME_LOCAL_TOKEN",
-    "timeout_seconds": 15,
+    "url": "",
+    "token": "",
+    "timeout_seconds": 5,
+    "auto_reconnect": false,
+    "reconnect_initial_seconds": 3,
+    "reconnect_max_seconds": 60
+  },
+  "mobile_protocol": {
+    "enabled": true,
+    "endpoint": "127.0.0.1:27042",
+    "process_name": "com.tencent.mobileqq",
+    "adb_serial": "127.0.0.1:16416",
+    "adb_path": "",
     "auto_reconnect": true,
     "reconnect_initial_seconds": 3,
     "reconnect_max_seconds": 60

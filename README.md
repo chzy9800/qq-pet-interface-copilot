@@ -1,12 +1,18 @@
 # QQ Pet Interface Copilot / QQ 宠物接口助手
 
-中文：一个正在验证中的电脑端 QQ 宠物自动控制工具。项目复用已登录电脑版 QQ/NapCat 的会话、签名和加密封包，通过本机 OneBot `send_packet` 调用宠物 OIDB 接口，不需要长期连接手机或 ADB。
+中文：一个正在验证中的电脑端 QQ 宠物自动控制工具。当前版本只使用 Android 手机 QQ 协议，通过本机模拟器中的已登录手机 QQ 调用宠物 OIDB 接口；调度器不会连接或回退到 NapCat/OneBot。
 
-English: A PC-side QQ pet automation assistant under active validation. It reuses the session, signing, and encrypted packet capability of an already logged-in QQ/NapCat instance, then calls pet OIDB APIs through local OneBot `send_packet`; it does not require a persistent phone or ADB connection.
+English: A PC-side QQ pet automation assistant under active validation. The current version exclusively uses the Android QQ mobile protocol through a logged-in QQ instance in a local emulator; the scheduler never connects or falls back to NapCat/OneBot.
 
 > 中文：当前仓库用于展示阶段性成果，处于公开预览阶段。请只操作自己的 QQ 账号，并自行承担非公开接口发生变化的风险。
 >
 > English: This repository is a public preview of work in progress. Use it only with your own QQ account and accept the risk that undocumented interfaces may change.
+
+## 重要变更：弃用 NapCatQQ
+
+当前版本已经停用 NapCatQQ、OneBot 和电脑版 QQ 封包链路，状态读取及任务写入统一改走 Android 手机 QQ 协议。迁移原因是宠物服务器近期对部分电脑版协议命令持续返回空响应，而相同命令通过手机 QQ 会话可以取得有效结果。调度器在手机协议连接失败时只进入重连，不会静默回退到 NapCatQQ，也不会重复发送结果不确定的写指令。
+
+NapCatQQ 相关兼容代码可能暂时保留在历史模块中，方便旧版本对照，但一键启动器、设置页面和自动调度器均不再安装、启动或调用 NapCatQQ。
 
 ## 已验证成果
 
@@ -43,20 +49,21 @@ English: A PC-side QQ pet automation assistant under active validation. It reuse
 - 冒险会读取服务器实时选项（当前正式选项为“打招呼”），只选择服务器标记为可执行的项目，再调用真实 `6700` 开始接口。
 - 设置页可以刷新并固定服务器返回的冒险选项，不再使用写死的“金币/技能/气候”假路线。
 - 任务完成后按 `storyId` 结算并持久化，避免对旧任务反复结算。
-- NapCat 接口连接超时后自动进入重连状态，默认从 3 秒开始指数退避、最长等待 60 秒；恢复后继续下一轮，不会重发刚才可能已经送达的写指令。
+- 手机 QQ 协议连接超时后自动进入重连状态，默认从 3 秒开始指数退避、最长等待 60 秒；恢复后继续下一轮，不会重发刚才可能已经送达的写指令。
 - 普通操作反馈使用不阻塞界面的应用内彩色消息；主任务连续失败达到阈值后，可通过“外部通知”发送 Windows 系统通知、Bark、PushPlus、Server酱、SMTP 和自定义 Webhook，支持重复发送冷却、恢复通知和界面内测试发送。
 
 ## 当前限制
 
 - 好友雇佣的开工字段已经恢复，但服务器尚未返回可用雇佣列表，因此自动选择好友仍未完成；无好友时会按正式协议正常开工。
 - 好友列表与每日断点续跑框架已完成；访问好友和“踩踩”写接口必须取得真实动态路径后才会开放。
-- 自动 PK 已实现服务器好友宠物池分页读取和轮换；当前电脑 QQ 会话若对好友池命令返回空包，会明确记录并临时使用已验证的备用对手，不会把空成功码误报成“已读取全部好友”。
+- 自动 PK 已实现服务器好友宠物池分页读取和轮换；手机协议若对好友池命令返回空包，会明确记录并临时使用已验证的备用对手，不会把空成功码误报成“已读取全部好友”。
 - “PK 好友”独立页面支持按 QQ 好友名选择或直接输入 QQ 号，自动解析真实 petId、好友备注和实时战力；可自定义连续 PK 1–99 场，手动结果不会写入自动 PK 的每日轮换进度。
 - PK 与好友照顾的好友选择框会把已确认有宠物的好友排在最前，并可隐藏服务器确认无宠物的好友；接口临时不可用时保留“宠物资料未知”对象，避免错误排除。
 - “好友照顾”页面可维护独立监控名单；默认每 60 秒读取名单内好友体力，低于 80 时自动喂食。失败好友进入独立冷却，成功必须重新读取好友体力确认上涨，并计入每日好友喂食次数。
 - 被雇佣召回支持“等到 25/75（收益分成最高）”和“立刻召回”两种策略；召回使用服务器结算回包验证、按 storyId 去重并写入每日计数。
+- 打工设置可启用“自动雇佣好友”；开工前优先读取服务器好友宠物池并选择可用好友，好友池暂时为空时可使用已验证的备用好友，缺少可靠 petId 时才无好友开工。
 - 冒险奖励由服务器在结算时决定，目录可能只给出事件描述而不提前显示奖励。
-- 项目依赖 NapCat 提供的原始封包能力，尚不是独立 QQ 登录客户端。
+- 项目依赖本机 Android 模拟器和已登录的手机 QQ，尚不是独立 QQ 登录客户端；模拟器与 QQ 必须保持运行。
 
 ## 快速开始
 
@@ -65,23 +72,21 @@ English: A PC-side QQ pet automation assistant under active validation. It reuse
 双击 `start-interface-copilot.bat`，启动器会依次完成：
 
 1. 检查 Microsoft VC++ 2015–2022 x64 必备运行库；缺失时只从 Microsoft 官方地址下载，验证 Authenticode 数字签名后静默安装。
-2. 检查 NapCat 完整运行环境和本机 OneBot 接口。
-3. NapCat 未安装时，直接从官方 GitHub 下载 `NapCat.Shell.Windows.Node.zip`，核对 GitHub Release 提供的 SHA-256，并自动解压到当前用户的应用数据目录。
-4. 直接启动完整 NapCat 环境；尚未登录时会等待二维码 PNG 写入完整后在助手内显示，避免 Windows 图片查看器过早打开损坏文件；NapCat 提前退出时会展示退出码和启动日志，不会再安装或弹出 NapCatQQ Desktop 管理器。
-5. 从 NapCat `get_login_info` 读取当前 QQ 账号，从本机 NapCat 配置读取接口端口和令牌；若尚未配置 HTTP 服务，会仅增加一个随机令牌、仅监听 `127.0.0.1` 的本机接口。
-6. 验证宠物状态后保存本机配置并打开控制台。
+2. 检查 Android 模拟器、ADB 调试连接和手机 QQ 协议桥。
+3. 从模拟器中已登录的手机 QQ 读取当前账号和宠物资料。
+4. 验证宠物状态后保存本机配置并打开控制台。
 
-Release 中的 `QQ宠物助手.exe` 已内置 Python、Tcl/Tk 图形界面、HTTPS/证书、加密和 OnePush 通知依赖，普通用户不需要另外安装 Python 或执行 `pip install`。电脑只需使用 Windows x64，并安装可正常登录的电脑版 QQ；缺少的 VC++ 运行库和 NapCat 由上述一键流程补齐。
+Release 中的 `QQ宠物助手.exe` 已内置 Python、Tcl/Tk 图形界面、HTTPS/证书、加密和 OnePush 通知依赖，普通用户不需要另外安装 Python 或执行 `pip install`。当前手机协议版还需要一个已启动、已登录手机 QQ 且开放调试连接的 Android 模拟器。
 
-首次接入时，启动器会通过当前电脑版 QQ 会话调用本人资料接口，直接从服务器读取并校验 `petId`，随后自动保存，不再要求手机、ADB 或手工填写。控制台的“连接与账号”设置中也提供“从服务器一键读取并保存宠物 ID”按钮。启动器不会导出 QQ 会话，也不会把接口令牌上传到网络。
+首次接入时，启动器会通过模拟器中的手机 QQ 调用本人资料接口，直接从服务器读取并校验 `petId`，随后自动保存。启动器不会导出 QQ 会话，也不会把会话数据上传到网络。
 
-NapCat 与 SnowLuma 是两套并列的 QQ Bot 框架，不是前后依赖关系。本助手使用 NapCat 的 `send_packet` 能力，因此一键流程只安装所需的 NapCat 完整环境，避免两个框架同时接管同一 QQ 会话。第三方运行包不会放进本仓库或 Release，而是在用户电脑上从 NapCat 官方 Release 下载并校验。
+NapCat、OneBot 和 SnowLuma 均不属于当前运行链路，启动器不会下载、安装或启动它们。
 
 也可以下载 GitHub Actions 生成的 `QQ-Pet-Interface-Copilot-Windows-x64.zip`，解压后直接运行 `QQ宠物助手.exe`。
 
 ### 开发者启动
 
-准备已登录目标账号的电脑版 QQ 和 NapCat，使用 Python 3.11+ 运行：
+准备已登录目标账号的 Android 模拟器手机 QQ 和协议桥，使用 Python 3.11+ 运行：
 
 ```powershell
 py -3 launcher.py
@@ -92,11 +97,11 @@ py -3 launcher.py
 ## 运行流程
 
 ```text
-电脑版 QQ 登录
+模拟器中的手机 QQ 登录
       ↓
-NapCat 使用本机会话并开放 127.0.0.1 OneBot 接口
+手机协议桥连接 QQ 进程
       ↓
-一键启动器发现账号、接口端口与本机令牌
+一键启动器读取账号与宠物 ID
       ↓
 QQ 宠物助手读取服务器状态和动态规则
       ↓
@@ -105,7 +110,7 @@ QQ 宠物助手读取服务器状态和动态规则
 重新读取服务器状态验证结果，并写入 runs/ 每日进度
 ```
 
-本项目不包含 QQ 或 NapCat。GPL-3.0-only 只覆盖本仓库代码；QQ 与 NapCat 分别遵循其自身许可和使用条款。正常运行无需 ADB，ADB 仅用于协议研究阶段的调试。
+本项目不包含 QQ 或模拟器。GPL-3.0-only 只覆盖本仓库代码；QQ 与模拟器分别遵循其自身许可和使用条款。当前版本运行时需要本机模拟器调试连接。
 
 ## 测试
 

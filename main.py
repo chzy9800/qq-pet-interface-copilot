@@ -9,7 +9,11 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Any
 
-from qqpet_app.client import NapCatClient, PKOpponent
+from qqpet_app.client import (
+    PKOpponent,
+    QQPetConnectionError,
+    QQPetEmptyResponse,
+)
 from qqpet_app.config import ConfigStore
 from qqpet_app.friend_visits import FriendVisitProgress, eligible_friends
 from qqpet_app.friend_pet_cache import load_latest_friend_pet_capture
@@ -30,12 +34,13 @@ FRIEND_VISIT_DIR = ROOT / "runs"
 
 
 SETTING_FIELDS = [
-    ("napcat.url", "本机接口地址", str),
-    ("napcat.token", "本机接口令牌", str),
-    ("napcat.timeout_seconds", "接口请求超时（秒）", float),
-    ("napcat.auto_reconnect", "接口断开后自动重连", bool),
-    ("napcat.reconnect_initial_seconds", "自动重连初始间隔（秒）", float),
-    ("napcat.reconnect_max_seconds", "自动重连最大间隔（秒）", float),
+    ("mobile_protocol.enabled", "启用模拟器手机协议读取", bool),
+    ("mobile_protocol.endpoint", "手机协议本机地址", str),
+    ("mobile_protocol.adb_serial", "模拟器连接地址", str),
+    ("mobile_protocol.adb_path", "ADB 程序路径（留空自动查找）", str),
+    ("mobile_protocol.auto_reconnect", "手机协议断开后自动重连", bool),
+    ("mobile_protocol.reconnect_initial_seconds", "自动重连初始间隔（秒）", float),
+    ("mobile_protocol.reconnect_max_seconds", "自动重连最大间隔（秒）", float),
     ("account.uin", "QQ 号", str),
     ("account.pet_id", "宠物 ID", str),
     ("scheduler.interval_seconds", "轮询间隔（秒）", int),
@@ -44,7 +49,7 @@ SETTING_FIELDS = [
     ("school.attribute", "学习属性 culture/physical/art", str),
     ("work.enabled", "启用打工", bool),
     ("work.times_per_day", "每日打工上限（0 不限）", int),
-    ("work.employ_friend", "有可用好友时优先雇佣", bool),
+    ("work.employ_friend", "启用打工雇佣好友（自动选择可用好友）", bool),
     ("adventure.enabled", "启用冒险", bool),
     ("adventure.start_time", "冒险开始时间 HH:MM", str),
     ("adventure.times_per_day", "每日冒险上限", int),
@@ -122,7 +127,7 @@ CHOICE_FIELDS = {
 }
 
 SETTING_SECTIONS = (
-    ("connection", "连接与账号", ("napcat.", "account.")),
+    ("connection", "连接与账号", ("mobile_protocol.", "account.")),
     ("scheduler", "自动调度", ("scheduler.",)),
     ("care", "自己的宠物照顾", ("care.",)),
     ("school", "学习", ("school.",)),
@@ -210,6 +215,7 @@ class MainWindow(tk.Tk):
         self.after(700, self._refresh_work_jobs)
         self.after(900, self._refresh_adventure_options)
         self.after(1100, self._refresh_manual_pk_friends)
+        self.after(250, self._probe_connection)
         self.after(100, self._drain_events)
         if auto_start:
             self.after(250, self._start)
@@ -1037,22 +1043,16 @@ class MainWindow(tk.Tk):
         def worker() -> None:
             try:
                 config = self.config_store.data
-                client = NapCatClient(
-                    config["napcat"]["url"],
-                    config["napcat"]["token"],
-                    config["account"]["pet_id"],
-                    float(config["napcat"]["timeout_seconds"]),
-                )
+                client = Scheduler._make_client(config)
                 fallback = self.manual_pk_cached_opponents.get(uin)
                 opponent = client.resolve_pk_opponent(
                     uin, fallback or self._configured_pk_opponent(config)
                 )
-                friend_values_client = NapCatClient(
-                    config["napcat"]["url"],
-                    config["napcat"]["token"],
-                    opponent.pet_id,
-                    float(config["napcat"]["timeout_seconds"]),
-                )
+                friend_config = {
+                    **config,
+                    "account": {**config["account"], "pet_id": opponent.pet_id},
+                }
+                friend_values_client = Scheduler._make_client(friend_config)
                 values = friend_values_client.query_values()
                 self.events.put(("friend_care_target_resolved", (opponent, values)))
             except Exception as exc:
@@ -1121,12 +1121,7 @@ class MainWindow(tk.Tk):
         def worker() -> None:
             try:
                 config = self.config_store.data
-                client = NapCatClient(
-                    config["napcat"]["url"],
-                    config["napcat"]["token"],
-                    config["account"]["pet_id"],
-                    float(config["napcat"]["timeout_seconds"]),
-                )
+                client = Scheduler._make_client(config)
                 stage = client.query_school_stage()
                 courses = client.query_school_courses(stage)
                 self.events.put(("school_courses", (stage, courses)))
@@ -1145,11 +1140,13 @@ class MainWindow(tk.Tk):
 
         def worker() -> None:
             try:
-                url = str(self.setting_vars["napcat.url"][0].get()).strip()
-                token = str(self.setting_vars["napcat.token"][0].get()).strip()
-                timeout = float(self.setting_vars["napcat.timeout_seconds"][0].get())
                 expected_uin = str(self.setting_vars["account.uin"][0].get()).strip()
-                client = NapCatClient(url, token, "", timeout)
+                config = self.config_store.data
+                lookup_config = {
+                    **config,
+                    "account": {**config["account"], "pet_id": ""},
+                }
+                client = Scheduler._make_client(lookup_config)
                 logged_in_uin = client.check_connection()
                 if expected_uin and expected_uin != logged_in_uin:
                     raise RuntimeError(
@@ -1169,12 +1166,7 @@ class MainWindow(tk.Tk):
         def worker() -> None:
             try:
                 config = self.config_store.data
-                client = NapCatClient(
-                    config["napcat"]["url"],
-                    config["napcat"]["token"],
-                    config["account"]["pet_id"],
-                    float(config["napcat"]["timeout_seconds"]),
-                )
+                client = Scheduler._make_client(config)
                 overview = client.query_work_overview()
                 jobs = tuple(
                     job
@@ -1195,12 +1187,7 @@ class MainWindow(tk.Tk):
         def worker() -> None:
             try:
                 config = self.config_store.data
-                client = NapCatClient(
-                    config["napcat"]["url"],
-                    config["napcat"]["token"],
-                    config["account"]["pet_id"],
-                    float(config["napcat"]["timeout_seconds"]),
-                )
+                client = Scheduler._make_client(config)
                 options = client.query_adventure_options()
                 self.events.put(("adventure_options", options))
             except Exception as exc:
@@ -1299,15 +1286,58 @@ class MainWindow(tk.Tk):
         self.start_button.configure(state=tk.NORMAL)
         self.stop_button.configure(state=tk.DISABLED)
 
+    def _probe_connection(self) -> None:
+        """Report QQ session health independently from pet business reads."""
+
+        def worker() -> None:
+            try:
+                config = self.config_store.data
+                client = Scheduler._make_client(config)
+                uin = client.check_connection()
+                self.events.put(("connection", f"QQ {uin} 已连接"))
+            except Exception as exc:
+                self.events.put(("connection", "手机 QQ 协议未连接"))
+                self.events.put(
+                    ("log", f"[{datetime.now():%H:%M:%S}] 手机 QQ 协议连接检查失败：{exc}")
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _check_once(self) -> None:
         def worker() -> None:
             scheduler = self._new_scheduler()
             try:
+                config = scheduler.config_store.data
+                uin = scheduler.client_factory(config).check_connection()
+                self.events.put(("connection", f"QQ {uin} 已连接"))
                 scheduler.run_once()
+            except QQPetEmptyResponse as exc:
+                self.events.put(
+                    (
+                        "log",
+                        f"[{datetime.now():%H:%M:%S}] 手机 QQ 协议已连接，"
+                        f"但宠物读取接口暂时无响应：{exc}",
+                    )
+                )
+                self.events.put(("connection", "QQ 已连接 · 宠物接口重试中"))
+                self.events.put(
+                    (
+                        "notice",
+                        (
+                            "宠物接口正在重试",
+                            "QQ 登录正常，但桌面端宠物读取接口暂未返回数据。",
+                            "warning",
+                        ),
+                    )
+                )
+            except QQPetConnectionError as exc:
+                self.events.put(("log", f"[{datetime.now():%H:%M:%S}] 检查失败：{exc}"))
+                self.events.put(("connection", "手机 QQ 协议未连接"))
+                self.events.put(("notice", ("连接失败", str(exc), "error")))
             except Exception as exc:
                 self.events.put(("log", f"[{datetime.now():%H:%M:%S}] 检查失败：{exc}"))
-                self.events.put(("connection", "连接失败"))
-                self.events.put(("notice", ("连接失败", str(exc), "error")))
+                self.events.put(("connection", "QQ 已连接 · 宠物接口异常"))
+                self.events.put(("notice", ("宠物接口异常", str(exc), "error")))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1405,12 +1435,7 @@ class MainWindow(tk.Tk):
         def worker() -> None:
             try:
                 config = self.config_store.data
-                client = NapCatClient(
-                    config["napcat"]["url"],
-                    config["napcat"]["token"],
-                    config["account"]["pet_id"],
-                    float(config["napcat"]["timeout_seconds"]),
-                )
+                client = Scheduler._make_client(config)
                 friends = client.query_friend_list()
                 pool_error = ""
                 try:
@@ -1462,12 +1487,7 @@ class MainWindow(tk.Tk):
         def worker() -> None:
             try:
                 config = self.config_store.data
-                client = NapCatClient(
-                    config["napcat"]["url"],
-                    config["napcat"]["token"],
-                    config["account"]["pet_id"],
-                    float(config["napcat"]["timeout_seconds"]),
-                )
+                client = Scheduler._make_client(config)
                 fallback = self.manual_pk_cached_opponents.get(uin)
                 opponent = client.resolve_pk_opponent(
                     uin, fallback or self._configured_pk_opponent(config)
@@ -1512,12 +1532,7 @@ class MainWindow(tk.Tk):
                 config = self.config_store.data
                 if config["safety"]["safe_mode"]:
                     raise RuntimeError("安全模式已开启，请先在设置中关闭后再手动 PK")
-                client = NapCatClient(
-                    config["napcat"]["url"],
-                    config["napcat"]["token"],
-                    config["account"]["pet_id"],
-                    float(config["napcat"]["timeout_seconds"]),
-                )
+                client = Scheduler._make_client(config)
                 opponent = client.resolve_pk_opponent(
                     uin, self._configured_pk_opponent(config)
                 )
@@ -1558,12 +1573,7 @@ class MainWindow(tk.Tk):
         def worker() -> None:
             try:
                 config = self.config_store.data
-                client = NapCatClient(
-                    config["napcat"]["url"],
-                    config["napcat"]["token"],
-                    config["account"]["pet_id"],
-                    float(config["napcat"]["timeout_seconds"]),
-                )
+                client = Scheduler._make_client(config)
                 friends = client.query_friend_list()
                 visit_config = config["friend_visits"]
                 candidates = eligible_friends(
@@ -1596,7 +1606,7 @@ class MainWindow(tk.Tk):
                         elif rules.declared_count == 0:
                             protocol_state = "windows_unsupported"
                             protocol_detail = (
-                                "Windows/NapCat 会话返回好友页面规则 count=0"
+                                "手机 QQ 会话返回好友页面规则 count=0"
                             )
                         else:
                             protocol_state = "path_missing"
@@ -1740,10 +1750,15 @@ class MainWindow(tk.Tk):
                 elif kind == "connection":
                     connection_text = str(payload)
                     self.status_vars["connection"].set(connection_text)
-                    is_connected = connection_text == "已连接"
+                    is_connected = "已连接" in connection_text
+                    is_degraded = "重试" in connection_text or "异常" in connection_text
                     self.hero_connection_label.configure(
-                        background="#e1f7ee" if is_connected else "#fff0d7",
-                        foreground="#187d53" if is_connected else "#9b6109",
+                        background="#fff0d7" if is_degraded else (
+                            "#e1f7ee" if is_connected else "#fff0d7"
+                        ),
+                        foreground="#9b6109" if is_degraded else (
+                            "#187d53" if is_connected else "#9b6109"
+                        ),
                     )
                 elif kind == "activity":
                     self.status_vars["story"].set(str(payload))

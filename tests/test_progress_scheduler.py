@@ -17,6 +17,7 @@ from qqpet_app.client import (
     PKPower,
     PKOpponent,
     PKResult,
+    QQPetEmptyResponse,
     QQPetError,
     QQFriend,
     SchoolCourse,
@@ -605,6 +606,27 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertTrue(progress.story_was_settled("6700_once"))
             self.assertEqual(progress.snapshot()["settled_story_ids"], ["6700_once"])
 
+    def test_stale_settled_story_does_not_bypass_new_pending_guard(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            scheduler.progress.mark_story_settled("6100_old")
+            scheduler.progress.set_pending("school")
+
+            handled = scheduler._handle_story(
+                None,
+                store.data,
+                StoryStatus(
+                    story_id="6100_old",
+                    remaining_seconds=0,
+                    duration_seconds=3600,
+                ),
+            )
+
+            self.assertTrue(handled)
+            self.assertEqual(scheduler.progress.snapshot()["pending"]["kind"], "school")
+
     def test_run_once_starts_only_server_offered_scene(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -613,6 +635,7 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             config["adventure"]["start_time"] = "23:59"
             config["safety"]["safe_mode"] = False
             config["safety"]["allow_experimental_scene_actions"] = True
+            config["work"]["employ_friend"] = False
             store.save(config)
 
             class FakeClient:
@@ -647,6 +670,48 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(fake.started, ("school", "physical"))
             self.assertEqual(scheduler.progress.snapshot()["pending"]["kind"], "school")
 
+    def test_empty_start_response_waits_for_story_instead_of_resending(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["adventure"]["enabled"] = False
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            store.save(config)
+
+            class FakeClient:
+                starts = 0
+
+                def query_values(self):
+                    return PetValues(gold=1000, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+                def start_school(self, _option, _preferred_sub_event=0):
+                    self.starts += 1
+                    raise QQPetEmptyResponse("OidbSvcTrpcTcp.0x975e_1")
+
+            fake = FakeClient()
+            logs: list[str] = []
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                log=logs.append,
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "school")
+            self.assertEqual(fake.starts, 1)
+            self.assertEqual(scheduler.progress.snapshot()["pending"]["kind"], "school")
+
+            self.assertEqual(scheduler.run_once(), "story")
+            self.assertEqual(fake.starts, 1)
+            self.assertTrue(any("不会重复开课" in line for line in logs))
+
     def test_run_once_starts_work_through_real_career_interface(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -656,6 +721,7 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             config["adventure"]["enabled"] = False
             config["safety"]["safe_mode"] = False
             config["safety"]["allow_experimental_scene_actions"] = True
+            config["work"]["employ_friend"] = False
             store.save(config)
 
             class FakeClient:
@@ -672,7 +738,15 @@ class ProgressAndSchedulerTests(unittest.TestCase):
 
                     return FoodInventory(biscuits=12, shrimp=10)
 
-                def start_work(self, career_type, preferred_sub_event, strategy):
+                def start_work(
+                    self,
+                    career_type,
+                    preferred_sub_event,
+                    strategy,
+                    hired_user_id,
+                    hired_pet_id,
+                ):
+                    self.assert_no_hire = (hired_user_id, hired_pet_id)
                     self.started = (career_type, preferred_sub_event, strategy)
                     return WorkStartResult(
                         WorkJob(
@@ -695,7 +769,162 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             )
             self.assertEqual(scheduler.run_once(), "work")
             self.assertEqual(fake.started, (0, 0, "highest_total"))
+            self.assertEqual(fake.assert_no_hire, ("", ""))
             self.assertEqual(scheduler.progress.snapshot()["pending"]["kind"], "work")
+
+    def test_run_once_employs_verified_friend_for_work(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["scheduler"]["coin_threshold"] = 500
+            config["adventure"]["enabled"] = False
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            config["work"]["employ_friend"] = True
+            store.save(config)
+
+            class FakeClient:
+                started = None
+
+                def query_values(self):
+                    return PetValues(gold=1, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    from qqpet_app.client import FoodInventory
+
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+                def query_pk_friend_candidates(self):
+                    return (
+                        PKOpponent("10001", "pet-one", nickname="好友甲", power=10),
+                        PKOpponent("10002", "pet-two", nickname="好友乙", power=20),
+                    )
+
+                def select_work_job(
+                    self, career_type, preferred_sub_event, strategy, hired_pet_id
+                ):
+                    self.selected_with = hired_pet_id
+                    return WorkJob(
+                        1,
+                        "涂鸦小徒",
+                        "熬夜赶参赛稿",
+                        6411004,
+                        "金币 539",
+                        "4小时",
+                        can_do=True,
+                    )
+
+                def start_work(
+                    self,
+                    career_type,
+                    preferred_sub_event,
+                    strategy,
+                    hired_user_id,
+                    hired_pet_id,
+                ):
+                    self.started = (hired_user_id, hired_pet_id)
+                    return WorkStartResult(
+                        WorkJob(
+                            career_type,
+                            "涂鸦小徒",
+                            "熬夜赶参赛稿",
+                            preferred_sub_event,
+                            "金币 539",
+                            "4小时",
+                            can_do=True,
+                        ),
+                        "6400_friend",
+                        hired_friend=True,
+                    )
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "work")
+            self.assertEqual(fake.started, ("10002", "pet-two"))
+
+    def test_unavailable_saved_work_job_falls_back_before_start(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["scheduler"]["coin_threshold"] = 500
+            config["adventure"]["enabled"] = False
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            config["work"].update(
+                {
+                    "career_type": 1,
+                    "job_sub_event": 6411001,
+                    "employ_friend": False,
+                }
+            )
+            store.save(config)
+
+            class FakeClient:
+                def query_values(self):
+                    return PetValues(gold=1, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    from qqpet_app.client import FoodInventory
+
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+                def select_work_job(
+                    self, career_type, preferred_sub_event, strategy, hired_pet_id
+                ):
+                    if preferred_sub_event:
+                        raise QQPetError("指定岗位暂不可用")
+                    return WorkJob(
+                        2,
+                        "开放职业",
+                        "当前最高收益岗位",
+                        6422002,
+                        "金币 600",
+                        "4小时",
+                        can_do=True,
+                    )
+
+                def start_work(
+                    self,
+                    career_type,
+                    preferred_sub_event,
+                    strategy,
+                    hired_user_id,
+                    hired_pet_id,
+                ):
+                    self.started = (career_type, preferred_sub_event)
+                    return WorkStartResult(
+                        WorkJob(
+                            career_type,
+                            "开放职业",
+                            "当前最高收益岗位",
+                            preferred_sub_event,
+                            "金币 600",
+                            "4小时",
+                            can_do=True,
+                        ),
+                        "6400_fallback",
+                    )
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "work")
+            self.assertEqual(fake.started, (2, 6422002))
 
     def test_run_once_starts_adventure_through_real_option_interface(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

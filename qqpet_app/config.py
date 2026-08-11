@@ -8,9 +8,19 @@ from typing import Any
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "napcat": {
-        "url": "http://127.0.0.1:6201",
-        "token": "CHANGE_ME_LOCAL_TOKEN",
-        "timeout_seconds": 15,
+        "url": "",
+        "token": "",
+        "timeout_seconds": 5,
+        "auto_reconnect": False,
+        "reconnect_initial_seconds": 3,
+        "reconnect_max_seconds": 60,
+    },
+    "mobile_protocol": {
+        "enabled": True,
+        "endpoint": "127.0.0.1:27042",
+        "process_name": "com.tencent.mobileqq",
+        "adb_serial": "127.0.0.1:16416",
+        "adb_path": "",
         "auto_reconnect": True,
         "reconnect_initial_seconds": 3,
         "reconnect_max_seconds": 60,
@@ -167,10 +177,12 @@ class ConfigStore:
     def _validate(config: dict[str, Any]) -> None:
         if not config["account"]["pet_id"]:
             raise ValueError("account.pet_id 不能为空")
-        if float(config["napcat"]["timeout_seconds"]) <= 0:
-            raise ValueError("napcat.timeout_seconds 必须大于 0")
-        initial = float(config["napcat"]["reconnect_initial_seconds"])
-        maximum = float(config["napcat"]["reconnect_max_seconds"])
+        if config["mobile_protocol"].get("enabled") and not str(
+            config["mobile_protocol"].get("endpoint", "")
+        ).strip():
+            raise ValueError("mobile_protocol.endpoint 不能为空")
+        initial = float(config["mobile_protocol"]["reconnect_initial_seconds"])
+        maximum = float(config["mobile_protocol"]["reconnect_max_seconds"])
         if initial <= 0 or maximum < initial:
             raise ValueError("自动重连间隔必须大于 0，且最大间隔不能小于初始间隔")
         if config["school"]["attribute"] not in {"culture", "physical", "art"}:
