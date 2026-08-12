@@ -11,6 +11,7 @@ from qqpet_app.client import (
     AdventureStartResult,
     BathInventory,
     FoodInventory,
+    FoodItem,
     PageRules,
     PetValues,
     OidbResponse,
@@ -1224,6 +1225,84 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(scheduler.run_once(), "feed")
             self.assertTrue(fake.fed)
             self.assertEqual(scheduler.progress.count("feed"), 1)
+
+    def test_auto_care_can_feed_selected_shrimp(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["care"]["food_item"] = "shrimp"
+            config["care"]["verify_delay_seconds"] = 0
+            store.save(config)
+
+            class FakeClient:
+                fed = False
+                selected = ""
+
+                def query_values(self):
+                    return PetValues(hunger=90 if self.fed else 70, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=10, shrimp=4 if self.fed else 5)
+
+                def query_food_items(self):
+                    return (FoodItem("3", "虾仁", 4 if self.fed else 5),)
+
+                def feed(self, food_id=""):
+                    self.selected = food_id
+                    self.fed = True
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "feed")
+            self.assertEqual(fake.selected, "3")
+
+    def test_auto_care_can_wash_with_selected_bath_ball(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["care"]["bath_item"] = "bath_ball"
+            config["care"]["verify_delay_seconds"] = 0
+            store.save(config)
+
+            class FakeClient:
+                washed = False
+                selected = ""
+
+                def query_values(self):
+                    return PetValues(hunger=100, clean=90 if self.washed else 70)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=10, shrimp=5)
+
+                def query_bath_inventory(self):
+                    return BathInventory((('1', 10), ('2', 4 if self.washed else 5)))
+
+                def use_bath_item(self, item_id):
+                    self.selected = item_id
+                    self.washed = True
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "wash")
+            self.assertEqual(fake.selected, "2")
 
 
 if __name__ == "__main__":

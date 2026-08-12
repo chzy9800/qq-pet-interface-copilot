@@ -91,9 +91,9 @@ class PKOpponent:
 class FoodInventory:
     """Food counts returned by PetFeed_GetFeedTimesInfo.
 
-    Android QQ 9.3.35 confirms root field 1 is biscuits.  Shrimp is nested in
-    root field 3 -> field 3 -> field 1; root field 2 is an allowance/limit.
-    A root-field-2 fallback is retained for older compact responses.
+    Android QQ returns authoritative per-item balances in repeated root field 4.
+    Root field 1 also mirrors biscuits; root field 2 is an allowance/limit.
+    Older responses without item rows retain the legacy nested shrimp fallback.
     """
 
     biscuits: int = 0
@@ -717,7 +717,10 @@ class NapCatClient:
 
     def query_food_items(self) -> tuple[FoodItem, ...]:
         response = self.send_oidb_read(*self.FEED_TIMES, b"").body
-        root = parse_message(response)
+        return self._decode_food_items(parse_message(response))
+
+    @staticmethod
+    def _decode_food_items(root: dict[int, list]) -> tuple[FoodItem, ...]:
         items: list[FoodItem] = []
         for value in root.get(4, []):
             if value.wire_type != 2:
@@ -737,21 +740,27 @@ class NapCatClient:
         return tuple(items)
 
     def query_food_inventory(self) -> FoodInventory:
-        # 手机 QQ 9.3.35 的真实响应中：根字段 1=饼干；根字段 2 是
-        # 上限/额度（当前实测为 999），不是虾仁。虾仁数量位于字段 3
-        # 状态消息的字段 3 子消息中。旧版精简响应才把虾仁放在根字段 2。
+        # 手机 QQ 的真实响应中，根字段 4 是食物目录，目录条目的字段 1
+        # 才是各食物的实时余额。根字段 3 内的数字是喂食/兑换状态，不是
+        # 虾仁库存；2026-08-12 实测它为 1，而目录明确返回虾仁 5。
         response = self.send_oidb_read(*self.FEED_TIMES, b"").body
         root = parse_message(response)
+        items = self._decode_food_items(root)
+        biscuits = next(
+            (item.balance for item in items if item.food_id == "1" or item.name == "饼干"),
+            first_varint(root, 1),
+        )
+        shrimp_item = next(
+            (item for item in items if item.food_id == "3" or "虾仁" in item.name),
+            None,
+        )
         state_raw = first_bytes(root, 3)
         state = parse_message(state_raw) if state_raw else {}
         shrimp_raw = first_bytes(state, 3)
-        shrimp = (
-            first_varint(parse_message(shrimp_raw), 1)
-            if shrimp_raw
-            else first_varint(root, 2)
-        )
+        legacy_shrimp = first_varint(parse_message(shrimp_raw), 1) if shrimp_raw else 0
+        shrimp = shrimp_item.balance if shrimp_item is not None else legacy_shrimp
         return FoodInventory(
-            biscuits=first_varint(root, 1),
+            biscuits=biscuits,
             shrimp=shrimp,
         )
 

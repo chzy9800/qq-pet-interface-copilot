@@ -725,12 +725,42 @@ class Scheduler:
                 self.activity("等待喂食条件恢复")
                 return "feed_blocked"
             if not self._safe_or_blocked(config, "喂食"):
-                # The recovered Feeding request uses feed_type=0, which is the
-                # biscuit path.  Do not assume it can consume shrimp.
-                if inventory.biscuits <= 0:
+                food_choice = str(care.get("food_item", "biscuit"))
+                food_name = "虾仁" if food_choice == "shrimp" else "饼干"
+                food_item = None
+                if food_choice == "shrimp":
+                    food_item = next(
+                        (
+                            item
+                            for item in client.query_food_items()
+                            if item.food_id == "3" or "虾仁" in item.name
+                        ),
+                        None,
+                    )
+                # Empty foodId is the verified default biscuit path. Shrimp
+                # always uses the exact server-provided foodId.
+                food_id = food_item.food_id if food_item else ""
+                food_count = (
+                    food_item.balance
+                    if food_item is not None
+                    else (inventory.shrimp if food_choice == "shrimp" else inventory.biscuits)
+                )
+                if food_choice == "shrimp" and food_item is None:
+                    self._block_care(config, "feed", "服务器未下发虾仁 foodId，无法安全发送虾仁喂食")
+                    self.activity("虾仁接口目录暂不可用")
+                    return "feed_unavailable"
+                if food_count <= 0:
                     if not care["auto_buy_supplies"]:
                         self.activity("缺少食物，自动购买未开启")
-                        self._block_care(config, "feed", f"饼干不足（虾仁 {inventory.shrimp}），自动购买已关闭")
+                        self._block_care(config, "feed", f"{food_name}不足，自动购买已关闭")
+                        return "feed_unavailable"
+                    if food_choice == "shrimp":
+                        self._block_care(
+                            config,
+                            "feed",
+                            "虾仁不足；当前金币购买接口只支持饼干，未发送错误购买指令",
+                        )
+                        self.activity("虾仁不足，暂无法自动兑换")
                         return "feed_unavailable"
                     self.activity("正在购买食物")
                     buy_count = int(care["food_purchase_count"])
@@ -746,20 +776,40 @@ class Scheduler:
                         f"花费 {purchase.cost_gold}，当前饼干 {inventory.biscuits}"
                     )
                 self.activity("正在喂食")
-                client.feed()
+                client.feed(food_id) if food_id else client.feed()
                 self._verify_delay(config)
                 after = client.query_values()
                 inventory_after = client.query_food_inventory()
-                if after.hunger > values.hunger or inventory_after.biscuits < inventory.biscuits:
+                after_food_item = None
+                if food_choice == "shrimp":
+                    after_food_item = next(
+                        (
+                            item
+                            for item in client.query_food_items()
+                            if item.food_id == food_id
+                        ),
+                        None,
+                    )
+                inventory_selected_after = (
+                    after_food_item.balance
+                    if after_food_item is not None
+                    else (
+                        inventory_after.shrimp
+                        if food_choice == "shrimp"
+                        else inventory_after.biscuits
+                    )
+                )
+                if after.hunger > values.hunger or inventory_selected_after < food_count:
                     self.progress.clear_care_block("feed")
                     self.progress.increment("feed")
                     self.log(
-                        f"体力不足，已自动喂食并验证成功：{values.hunger:.1f}→{after.hunger:.1f}，"
-                        f"剩余饼干 {inventory_after.biscuits}、虾仁 {inventory_after.shrimp}"
+                        f"体力不足，已使用{food_name}自动喂食并验证成功："
+                        f"{values.hunger:.1f}→{after.hunger:.1f}，剩余{food_name} "
+                        f"{inventory_selected_after}"
                     )
                     self.activity("喂食完成，等待下一轮")
                 else:
-                    self._block_care(config, "feed", "喂食响应成功但体力和饼干库存均未变化")
+                    self._block_care(config, "feed", f"{food_name}喂食响应成功但体力和库存均未变化")
                     self.activity("喂食未生效，等待重试")
             return "feed"
         if care["enabled"] and values.clean < float(care["clean_threshold"]):
@@ -768,39 +818,55 @@ class Scheduler:
                 return "wash_blocked"
             if not self._safe_or_blocked(config, "洗澡"):
                 bath_inventory = client.query_bath_inventory()
-                if bath_inventory.soap <= 0:
+                bath_choice = str(care.get("bath_item", "soap"))
+                bath_item_id = "2" if bath_choice == "bath_ball" else "1"
+                bath_item_name = "沐浴球" if bath_choice == "bath_ball" else "香皂片"
+                bath_count = bath_inventory.count(bath_item_id)
+                if bath_count <= 0:
                     if not care["auto_buy_supplies"]:
                         self.activity("缺少洗护用品，自动购买未开启")
-                        self._block_care(config, "wash", "香皂片不足，自动购买已关闭")
+                        self._block_care(config, "wash", f"{bath_item_name}不足，自动购买已关闭")
                         return "wash_unavailable"
                     self.activity("正在购买洗护用品")
                     buy_count = int(care["soap_purchase_count"])
-                    purchase = client.buy_bath_item("1", buy_count)
+                    purchase = client.buy_bath_item(bath_item_id, buy_count)
                     after_purchase = client.query_bath_inventory()
-                    if not purchase.succeeded and after_purchase.soap <= bath_inventory.soap:
-                        self._block_care(config, "wash", f"金币购买香皂片未成功（result={purchase.result}）")
+                    if (
+                        not purchase.succeeded
+                        and after_purchase.count(bath_item_id) <= bath_count
+                    ):
+                        self._block_care(
+                            config,
+                            "wash",
+                            f"金币购买{bath_item_name}未成功（result={purchase.result}）",
+                        )
                         self.activity("购买洗护用品失败，等待重试")
                         return "wash_unavailable"
                     bath_inventory = after_purchase
-                    self.log(f"香皂片不足，已用金币购买 {buy_count} 个，当前香皂片 {bath_inventory.soap}")
+                    bath_count = bath_inventory.count(bath_item_id)
+                    self.log(
+                        f"{bath_item_name}不足，已用金币购买 {buy_count} 个，"
+                        f"当前{bath_item_name} {bath_count}"
+                    )
                 self.activity("正在洗澡")
-                client.use_bath_item("1")
+                client.use_bath_item(bath_item_id)
                 self._verify_delay(config)
                 after = client.query_values()
                 bath_after = client.query_bath_inventory()
-                if after.clean > values.clean or bath_after.soap < bath_inventory.soap:
+                if after.clean > values.clean or bath_after.count(bath_item_id) < bath_count:
                     self.progress.clear_care_block("wash")
                     self.progress.increment("wash")
                     self.log(
-                        f"清洁不足，已消耗香皂片洗澡并验证成功："
-                        f"{values.clean:.1f}→{after.clean:.1f}，剩余香皂片 {bath_after.soap}"
+                        f"清洁不足，已消耗{bath_item_name}洗澡并验证成功："
+                        f"{values.clean:.1f}→{after.clean:.1f}，"
+                        f"剩余{bath_item_name} {bath_after.count(bath_item_id)}"
                     )
                     self.activity("洗澡完成，等待下一轮")
                 else:
                     self._block_care(
                         config,
                         "wash",
-                        "洗澡响应成功但清洁值和香皂片库存均未变化",
+                        f"洗澡响应成功但清洁值和{bath_item_name}库存均未变化",
                     )
                     self.activity("洗澡未生效，等待重试")
             return "wash"

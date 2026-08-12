@@ -99,6 +99,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "hunger_threshold": 80,
         "clean_threshold": 80,
         "auto_buy_supplies": True,
+        "food_item": "biscuit",
+        "bath_item": "soap",
         "food_purchase_count": 10,
         "soap_purchase_count": 10,
         "verify_delay_seconds": 1,
@@ -288,6 +290,10 @@ class ConfigStore:
             raise ValueError("care.food_purchase_count 必须大于 0")
         if int(config["care"]["soap_purchase_count"]) <= 0:
             raise ValueError("care.soap_purchase_count 必须大于 0")
+        if config["care"].get("food_item", "biscuit") not in {"biscuit", "shrimp"}:
+            raise ValueError("care.food_item 必须是 biscuit/shrimp")
+        if config["care"].get("bath_item", "soap") not in {"soap", "bath_ball"}:
+            raise ValueError("care.bath_item 必须是 soap/bath_ball")
         if float(config["story"]["recall_check_seconds"]) < 3:
             raise ValueError("story.recall_check_seconds 不能小于 3 秒")
         if config["story"].get("employed_recall_mode", "best_split") not in {

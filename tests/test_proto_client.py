@@ -838,6 +838,33 @@ class ProtoAndClientTests(unittest.TestCase):
         self.assertEqual(inventory.shrimp, 10)
         self.assertEqual(inventory.total, 22)
 
+    def test_food_inventory_prefers_catalog_shrimp_balance_over_state_counter(self) -> None:
+        def transport(_command: str, _data: str) -> dict:
+            biscuit = (
+                field_varint(1, 15)
+                + field_string(3, "饼干")
+                + field_string(4, "1")
+            )
+            shrimp = (
+                field_varint(1, 5)
+                + field_string(3, "虾仁")
+                + field_string(4, "3")
+            )
+            misleading_state = field_bytes(3, field_varint(1, 1))
+            body = (
+                field_varint(1, 15)
+                + field_varint(2, 999)
+                + field_bytes(3, misleading_state)
+                + field_bytes(4, biscuit)
+                + field_bytes(4, shrimp)
+            )
+            return oidb_response(39241, 1, body)
+
+        client = NapCatClient("http://unused", "token", "pet", transport=transport)
+        inventory = client.query_food_inventory()
+        self.assertEqual(inventory.biscuits, 15)
+        self.assertEqual(inventory.shrimp, 5)
+
     def test_food_catalog_and_selected_food_packet_use_server_food_id(self) -> None:
         calls = 0
 

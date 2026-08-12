@@ -87,8 +87,10 @@ SETTING_FIELDS = [
     ("care.hunger_threshold", "体力喂食阈值", float),
     ("care.clean_threshold", "清洁洗澡阈值", float),
     ("care.auto_buy_supplies", "道具不足时自动用金币购买", bool),
+    ("care.food_item", "自动喂食使用物品", str),
+    ("care.bath_item", "自动洗澡使用物品", str),
     ("care.food_purchase_count", "每次购买饼干数量", int),
-    ("care.soap_purchase_count", "每次购买香皂片数量", int),
+    ("care.soap_purchase_count", "每次购买洗护用品数量", int),
     ("care.verify_delay_seconds", "照顾后验证等待（秒）", float),
     ("care.failure_cooldown_seconds", "照顾失败重试间隔（秒）", float),
     ("story.recall_check_seconds", "被雇佣检查间隔（秒）", float),
@@ -122,6 +124,14 @@ SETTING_FIELDS = [
 ]
 
 CHOICE_FIELDS = {
+    "care.food_item": {
+        "饼干": "biscuit",
+        "虾仁": "shrimp",
+    },
+    "care.bath_item": {
+        "香皂片": "soap",
+        "沐浴球": "bath_ball",
+    },
     "work.hire_mode": {
         "自动选择可用好友": "auto",
         "手动选择固定好友": "manual",
