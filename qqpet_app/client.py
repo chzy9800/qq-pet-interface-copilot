@@ -233,6 +233,13 @@ class WorkOverview:
 
 
 @dataclass(frozen=True)
+class WorkCatalog:
+    overview: WorkOverview
+    jobs: tuple[WorkJob, ...] = ()
+    rejected_careers: tuple[tuple[WorkCareer, str], ...] = ()
+
+
+@dataclass(frozen=True)
 class WorkJob:
     career_type: int
     career_name: str
@@ -1116,6 +1123,36 @@ class NapCatClient:
             )
         return tuple(jobs)
 
+    @staticmethod
+    def is_work_eligibility_error(exc: Exception) -> bool:
+        code = int(getattr(exc, "code", 0) or 0)
+        message = str(exc)
+        return code in {14561, 135061} or "未达到该职业参与要求" in message
+
+    def query_work_catalog(self, hired_pet_id: str = "") -> WorkCatalog:
+        """Read every server-open career without losing valid jobs on one rejection."""
+        overview = self.query_work_overview()
+        jobs: list[WorkJob] = []
+        rejected: list[tuple[WorkCareer, str]] = []
+        for career in overview.careers:
+            if not career.available:
+                continue
+            try:
+                jobs.extend(self.query_work_jobs(career.career_type, hired_pet_id))
+            except QQPetError as exc:
+                # The overview describes globally open careers. The job endpoint
+                # then applies this pet's level/attribute requirements. A reject
+                # for one career must not hide jobs from the remaining careers.
+                if self.is_work_eligibility_error(exc):
+                    rejected.append((career, str(exc)))
+                    continue
+                raise
+        return WorkCatalog(
+            overview=overview,
+            jobs=tuple(jobs),
+            rejected_careers=tuple(rejected),
+        )
+
     def select_work_job(
         self,
         career_type: int = 0,
@@ -1126,7 +1163,8 @@ class NapCatClient:
     ) -> WorkJob:
         if strategy != "highest_total":
             raise QQPetError(f"未知岗位选择策略：{strategy}")
-        overview = self.query_work_overview()
+        catalog = self.query_work_catalog(hired_pet_id)
+        overview = catalog.overview
         available = [career for career in overview.careers if career.available]
         all_available = list(available)
         if career_type:
@@ -1139,7 +1177,9 @@ class NapCatClient:
             raise QQPetError("服务器当前没有开放的职业")
 
         excluded = {int(value) for value in excluded_sub_events}
-        rejected_careers: list[WorkCareer] = []
+        rejected_careers: list[WorkCareer] = [
+            career for career, _message in catalog.rejected_careers
+        ]
 
         def collect(careers: list[WorkCareer]) -> list[WorkJob]:
             found: list[WorkJob] = []
@@ -1147,7 +1187,7 @@ class NapCatClient:
                 try:
                     career_jobs = self.query_work_jobs(career.career_type, hired_pet_id)
                 except QQPetError as exc:
-                    if int(getattr(exc, "code", 0)) == 135061:
+                    if self.is_work_eligibility_error(exc):
                         rejected_careers.append(career)
                         continue
                     raise
@@ -1160,7 +1200,15 @@ class NapCatClient:
                 )
             return found
 
-        jobs = collect(available)
+        catalog_jobs = [
+            job
+            for job in catalog.jobs
+            if job.can_do
+            and job.sub_event_type > 0
+            and job.sub_event_type not in excluded
+            and (not career_type or job.career_type == int(career_type))
+        ]
+        jobs = catalog_jobs or collect(available)
         # A saved career can remain marked open even when this pet does not yet
         # satisfy its participation requirement. Fall back to other server-open
         # careers instead of retrying the rejected career every scheduler tick.
@@ -1238,7 +1286,7 @@ class NapCatClient:
         try:
             response = self.send_oidb(*self.WORK_START, body)
         except QQPetError as exc:
-            if int(getattr(exc, "code", 0)) == 135061:
+            if self.is_work_eligibility_error(exc):
                 raise WorkEligibilityError(str(exc), job) from exc
             raise
         story_id = first_string(parse_message(response.body), 1)

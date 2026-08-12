@@ -50,24 +50,23 @@ class InterfaceTestRunner:
         )
 
     def check_work_rules(self) -> InterfaceTestResult:
-        overview = self.client.query_work_overview()
+        catalog = self.client.query_work_catalog()
+        overview = catalog.overview
         open_careers = [career for career in overview.careers if career.available]
-        jobs = []
-        rejected = []
-        for career in open_careers:
-            try:
-                jobs.extend(self.client.query_work_jobs(career.career_type))
-            except QQPetError as exc:
-                rejected.append(f"{career.name or career.career_type}: {exc}")
-        available_jobs = [job for job in jobs if job.can_do and job.sub_event_type > 0]
+        available_jobs = [
+            job for job in catalog.jobs if job.can_do and job.sub_event_type > 0
+        ]
         detail = f"开放职业 {len(open_careers)} 个，可执行岗位 {len(available_jobs)} 个"
         if available_jobs:
             detail += "；" + "、".join(
                 f"{job.career_name}/{job.name}({job.sub_event_type})"
                 for job in available_jobs
             )
-        if rejected:
-            detail += "；服务器拒绝：" + "；".join(rejected)
+        if catalog.rejected_careers:
+            detail += "；当前宠物未满足：" + "、".join(
+                career.name or str(career.career_type)
+                for career, _message in catalog.rejected_careers
+            )
         return InterfaceTestResult("岗位规则读取", "服务器职业目录", True, detail)
 
     def feed(self, food_id: str, food_name: str) -> InterfaceTestResult:

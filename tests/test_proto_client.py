@@ -70,6 +70,38 @@ class ProtoAndClientTests(unittest.TestCase):
         selected = client.select_work_job()
         self.assertEqual(selected.sub_event_type, 6422001)
 
+    def test_work_catalog_keeps_valid_jobs_when_one_career_is_ineligible(self) -> None:
+        client = NapCatClient("http://unused", "token", "pet")
+        client.query_work_overview = lambda: WorkOverview(  # type: ignore[method-assign]
+            careers=(
+                WorkCareer(1, "未达要求职业", available=True),
+                WorkCareer(2, "当前可用职业", available=True),
+            )
+        )
+
+        def jobs(career_type: int, _hired_pet_id: str = ""):
+            if career_type == 1:
+                raise MobileProtocolServerError(14561, "你的宠物还未达到该职业参与要求")
+            return (
+                WorkJob(
+                    2,
+                    "当前可用职业",
+                    "可选岗位",
+                    6422001,
+                    "金币 100",
+                    "1小时",
+                    can_do=True,
+                ),
+            )
+
+        client.query_work_jobs = jobs  # type: ignore[method-assign]
+        catalog = client.query_work_catalog()
+        self.assertEqual([job.name for job in catalog.jobs], ["可选岗位"])
+        self.assertEqual(
+            [career.name for career, _message in catalog.rejected_careers],
+            ["未达要求职业"],
+        )
+
     def test_http_packet_transport_explicitly_waits_for_response(self) -> None:
         client = NapCatClient("http://unused", "token", "pet")
         calls = []

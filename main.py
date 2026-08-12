@@ -17,7 +17,7 @@ from qqpet_app.client import (
 from qqpet_app.config import ConfigStore
 from qqpet_app.friend_visits import FriendVisitProgress, eligible_friends
 from qqpet_app.friend_pet_cache import load_latest_friend_pet_capture
-from qqpet_app.interface_tests import InterfaceTestRunner
+from qqpet_app.interface_tests import InterfaceTestResult, InterfaceTestRunner
 from qqpet_app.notifications import NotificationManager
 from qqpet_app.scheduler import Scheduler
 from qqpet_app.single_instance import SingleInstance
@@ -197,9 +197,11 @@ class MainWindow(tk.Tk):
         self.test_job_var = tk.StringVar(value="请先刷新接口目录")
         self.test_adventure_var = tk.StringVar(value="请先刷新接口目录")
         self.interface_test_status_var = tk.StringVar(
-            value="先点击“刷新全部接口目录”，再选择目标进行单次测试。"
+            value="进入本页后会自动读取目录；也可点击刷新按钮重新读取。"
         )
         self.interface_test_buttons: list[ttk.Button] = []
+        self.interface_catalog_loading = False
+        self.interface_catalog_loaded = False
         self.manual_pk_friend_var = tk.StringVar(value="请先刷新好友")
         self.manual_pk_uin_var = tk.StringVar()
         self.manual_pk_pet_id_var = tk.StringVar()
@@ -667,7 +669,9 @@ class MainWindow(tk.Tk):
         )
         self.adventure_refresh_button.pack(side=tk.LEFT, padx=(6, 0))
         self.adventure_status_label = ttk.Label(
-            adventure_section, text="将从服务器读取真实冒险目录", foreground="#666"
+            adventure_section,
+            text="将从服务器读取天气冒险目录；冒险与学习、打工互斥执行",
+            foreground="#666",
         )
         self.adventure_status_label.grid(
             row=adventure_row + 1, column=1, sticky="w", padx=6, pady=(0, 5)
@@ -682,7 +686,8 @@ class MainWindow(tk.Tk):
             section,
             text=(
                 "这里用于逐项定位协议问题。灰色检查按钮只读取服务器；红色“真实测试”按钮会立刻"
-                "消耗道具或启动任务。学习、打工、冒险一旦成功，会占用主任务直到倒计时结束。"
+                "消耗道具或启动任务。学习、打工、冒险属于互斥主任务，一项成功后，另外两项必须"
+                "等待倒计时结束。进入本页会自动读取可选目录。"
             ),
             foreground="#b24a3a",
             wraplength=720,
@@ -832,6 +837,8 @@ class MainWindow(tk.Tk):
         viewport_height = self.settings_canvas.winfo_height()
         scrollable = max(1, content_height - viewport_height)
         self.settings_canvas.yview_moveto(min(1.0, container.winfo_y() / scrollable))
+        if key == "interface_test" and not self.interface_catalog_loaded:
+            self._refresh_interface_test_catalogs()
 
     def _show_notice(
         self,
@@ -1272,14 +1279,8 @@ class MainWindow(tk.Tk):
             try:
                 config = self.config_store.data
                 client = Scheduler._make_client(config)
-                overview = client.query_work_overview()
-                jobs = tuple(
-                    job
-                    for career in overview.careers
-                    if career.available
-                    for job in client.query_work_jobs(career.career_type)
-                )
-                self.events.put(("work_jobs", (overview, jobs)))
+                catalog = client.query_work_catalog()
+                self.events.put(("work_jobs", catalog))
             except Exception as exc:
                 self.events.put(("work_jobs_error", str(exc)))
 
@@ -1306,6 +1307,9 @@ class MainWindow(tk.Tk):
             button.configure(state=state)
 
     def _refresh_interface_test_catalogs(self) -> None:
+        if self.interface_catalog_loading:
+            return
+        self.interface_catalog_loading = True
         self._set_interface_test_busy(True)
         self.interface_test_status_var.set("正在读取全部服务器接口目录…")
 
@@ -1313,25 +1317,35 @@ class MainWindow(tk.Tk):
             try:
                 config = self.config_store.data
                 client = Scheduler._make_client(config)
-                runner = InterfaceTestRunner(client, config)
-                work_result = runner.check_work_rules()
                 food_items = client.query_food_items()
                 food_inventory = client.query_food_inventory()
                 bath_items = client.query_bath_items()
                 bath_inventory = client.query_bath_inventory()
                 stage = client.query_school_stage()
                 courses = tuple(item for item in client.query_school_courses(stage) if item.can_do)
-                overview = client.query_work_overview()
-                jobs = []
-                rejected = []
-                for career in overview.careers:
-                    if not career.available:
-                        continue
-                    try:
-                        jobs.extend(client.query_work_jobs(career.career_type))
-                    except Exception as exc:
-                        rejected.append(f"{career.name or career.career_type}: {exc}")
-                jobs = tuple(item for item in jobs if item.can_do and item.sub_event_type > 0)
+                work_catalog = client.query_work_catalog()
+                jobs = tuple(
+                    item
+                    for item in work_catalog.jobs
+                    if item.can_do and item.sub_event_type > 0
+                )
+                rejected = tuple(
+                    f"{career.name or career.career_type}: {message}"
+                    for career, message in work_catalog.rejected_careers
+                )
+                work_detail = (
+                    f"开放职业 {sum(1 for item in work_catalog.overview.careers if item.available)} 个，"
+                    f"可执行岗位 {len(jobs)} 个"
+                )
+                if jobs:
+                    work_detail += "；" + "、".join(
+                        f"{job.career_name}/{job.name}({job.sub_event_type})" for job in jobs
+                    )
+                if rejected:
+                    work_detail += f"；当前宠物未满足 {len(rejected)} 个职业要求"
+                work_result = InterfaceTestResult(
+                    "岗位规则读取", "服务器职业目录", True, work_detail
+                )
                 adventures = tuple(item for item in client.query_adventure_options() if item.can_do)
                 self.events.put(
                     (
@@ -1993,9 +2007,12 @@ class MainWindow(tk.Tk):
                     self.interface_test_status_var.set(detail)
                     self._append_log(f"[{datetime.now():%H:%M:%S}] 接口目录检查：{detail}")
                     self._set_interface_test_busy(False)
+                    self.interface_catalog_loading = False
+                    self.interface_catalog_loaded = True
                 elif kind == "interface_catalogs_error":
                     self.interface_test_status_var.set(f"接口目录刷新失败：{payload}")
                     self._set_interface_test_busy(False)
+                    self.interface_catalog_loading = False
                 elif kind == "interface_test_done":
                     result = payload
                     outcome = "成功" if result.succeeded else "未验证生效"
@@ -2314,6 +2331,15 @@ class MainWindow(tk.Tk):
                     self.course_options = options
                     self.course_combo.configure(values=tuple(options))
                     self.course_var.set(selected_label)
+                    test_options = {
+                        label: sub_event
+                        for label, sub_event in options.items()
+                        if sub_event > 0
+                    }
+                    self.test_course_combo.configure(values=tuple(test_options))
+                    self.test_course_var.set(
+                        next(iter(test_options), "当前阶段没有可执行课程")
+                    )
                     stage_name = {
                         0: "学前辅导",
                         1: "初级学园",
@@ -2329,7 +2355,8 @@ class MainWindow(tk.Tk):
                     self.course_stage_label.configure(text=f"课程读取失败：{payload}")
                     self.course_refresh_button.configure(state=tk.NORMAL)
                 elif kind == "work_jobs":
-                    overview, jobs = payload
+                    catalog = payload
+                    overview, jobs = catalog.overview, catalog.jobs
                     config = self.config_store.data
                     previous = int(config["work"].get("job_sub_event", 0))
                     automatic = "自动选择开放职业中总收益最高岗位"
@@ -2348,9 +2375,27 @@ class MainWindow(tk.Tk):
                     self.job_options = options
                     self.job_combo.configure(values=tuple(options))
                     self.job_var.set(selected_label)
+                    test_options = {
+                        label: target
+                        for label, target in options.items()
+                        if target != (0, 0)
+                    }
+                    self.test_job_combo.configure(values=tuple(test_options))
+                    self.test_job_var.set(
+                        next(iter(test_options), "当前没有可执行岗位")
+                    )
                     open_count = sum(1 for career in overview.careers if career.available)
+                    rejected_count = len(catalog.rejected_careers)
+                    rejected_text = (
+                        f"；{rejected_count} 个职业尚未满足参与要求，已跳过"
+                        if rejected_count
+                        else ""
+                    )
                     self.job_status_label.configure(
-                        text=f"服务器开放 {open_count} 个职业；共 {len(jobs)} 个岗位"
+                        text=(
+                            f"服务器开放 {open_count} 个职业；读取到 {len(test_options)} 个可执行岗位"
+                            f"{rejected_text}"
+                        )
                     )
                     self.job_refresh_button.configure(state=tk.NORMAL)
                 elif kind == "work_jobs_error":
@@ -2378,6 +2423,15 @@ class MainWindow(tk.Tk):
                     self.adventure_options = options
                     self.adventure_combo.configure(values=tuple(options))
                     self.adventure_var.set(selected_label)
+                    test_options = {
+                        label: name
+                        for label, name in options.items()
+                        if name and "｜可执行" in label
+                    }
+                    self.test_adventure_combo.configure(values=tuple(test_options))
+                    self.test_adventure_var.set(
+                        next(iter(test_options), "当前天气没有可执行冒险")
+                    )
                     self.adventure_status_label.configure(
                         text=f"服务器返回 {len(payload)} 项；当前可执行 {available_count} 项"
                     )
