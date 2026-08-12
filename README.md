@@ -128,6 +128,14 @@ py -3 -m unittest discover -s tests -v
 - `config.yaml`、运行日志、抓包、APK、设备提取物和账号响应均被 `.gitignore` 排除。
 - 不要把 OneBot 端口监听到公网，也不要提交真实 UIN、`pet_id` 或访问令牌。
 - 仓库不包含 QQ、NapCat、MuMu、APK 或其他第三方二进制文件。
+
+## 相关项目与致谢 / Related Project & Acknowledgements
+
+感谢 [490720818/qq-pet-copilot](https://github.com/490720818/qq-pet-copilot) 作者的开源工作。该项目基于 uiautomator2、RapidOCR 和 scrcpy 实现 QQ 宠物界面自动化，其统一调度、状态照顾、学习/打工场景编排、任务进度持久化以及图形界面等设计，为本项目早期的功能规划和交互设计提供了重要启发。
+
+本项目目前采用 MuMu 中真实 Android QQ 会话的协议调用方案，与上述项目的界面自动化实现路线不同。此处致谢表示设计思路上的启发与对开源贡献的尊重，不表示两个项目存在官方隶属关系，也不表示本项目直接复制了对方代码。
+
+Special thanks to the author of [490720818/qq-pet-copilot](https://github.com/490720818/qq-pet-copilot). Its open-source UI-automation approach and designs for scheduling, pet care, learning/workflows, persistent progress, and GUI interaction provided valuable inspiration during this project's early planning. The two projects use different technical approaches and are not officially affiliated.
 ## 开发进度与下周计划
 
 本项目目前仍处于持续验证和快速迭代阶段。本周已经完成自动 PK、好友宠物识别、好友自动照顾、任务幂等、通知系统以及部分雇佣协议恢复等功能，但由于本周可用于开发、测试和协议分析的模型/API 额度已经基本耗尽，后续功能验证将暂时放缓。
