@@ -32,6 +32,9 @@ class PKProgress:
                 "gold_earned": 0.0,
                 "records": [],
                 "retry_after": 0.0,
+                "daily_run_completed": False,
+                "daily_run_completed_at": "",
+                "daily_run_reason": "",
             }
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -44,6 +47,9 @@ class PKProgress:
         loaded.setdefault("gold_earned", 0.0)
         loaded.setdefault("records", [])
         loaded.setdefault("retry_after", 0.0)
+        loaded.setdefault("daily_run_completed", False)
+        loaded.setdefault("daily_run_completed_at", "")
+        loaded.setdefault("daily_run_reason", "")
         return loaded
 
     def _save(self, state: dict[str, Any]) -> None:
@@ -61,6 +67,17 @@ class PKProgress:
 
     def succeeded(self) -> int:
         return int(self.snapshot()["success"])
+
+    def daily_run_completed(self) -> bool:
+        return bool(self.snapshot().get("daily_run_completed", False))
+
+    def mark_daily_run_completed(self, reason: str) -> None:
+        with self._lock:
+            state = self._load()
+            state["daily_run_completed"] = True
+            state["daily_run_completed_at"] = datetime.now().astimezone().isoformat()
+            state["daily_run_reason"] = str(reason)
+            self._save(state)
 
     def retry_blocked(self) -> bool:
         return float(self.snapshot().get("retry_after", 0)) > datetime.now().timestamp()

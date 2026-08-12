@@ -104,8 +104,11 @@ class Scheduler:
         now = now or datetime.now()
         if not pk["enabled"] or now.strftime("%H:%M") < str(pk["start_time"]):
             return None
+        if self.pk_progress.daily_run_completed():
+            return None
         limit = int(pk["max_per_day"])
         if limit > 0 and self.pk_progress.succeeded() >= limit:
+            self.pk_progress.mark_daily_run_completed("已达到每日 PK 上限")
             return None
         mode = str(pk.get("opponent_mode", "fixed"))
         if mode == "fixed" and self.pk_progress.retry_blocked():
@@ -120,67 +123,115 @@ class Scheduler:
             self.activity("安全模式：已计划自动 PK")
             return "pk"
 
-        self.activity("正在比较双方战力")
-        opponent_uin = ""
-        opponent_pet_id = ""
-        try:
-            self_power = client.query_pk_power().power
-            opponent = self._select_pk_opponent(client, pk, self_power, now)
-            if opponent is None:
-                self.activity("暂无可挑战的好友宠物")
-                return None
-            opponent_uin = opponent.user_id
-            opponent_pet_id = opponent.pet_id
-            queried_opponent_power = client.query_pk_power(opponent_pet_id).power
-            opponent_power = queried_opponent_power or opponent.power
-            if (
-                pk.get("only_weaker", True)
-                and self_power > 0
-                and opponent_power > 0
-                and opponent_power >= self_power
-            ):
-                self.log(
-                    f"跳过 PK：自身战力 {self_power}，对手战力 {opponent_power}，"
-                    "已开启仅挑战更弱对手"
-                )
-                return None
+        self.log(
+            f"每日定时 PK 批次开始：计划时间 {pk['start_time']}，"
+            f"今日上限 {limit if limit > 0 else '按好友额度'} 次"
+        )
+        completed_this_batch = 0
+        # max_per_day=0 means exhaust the configured friend quotas. Keep a hard
+        # safety ceiling in case a fixed opponent is configured without a limit.
+        safety_ceiling = limit if limit > 0 else max(
+            1, int(pk.get("per_friend_limit", 3)) * (100 if mode == "all_friends" else 1)
+        )
+        while self.pk_progress.succeeded() < safety_ceiling:
+            current_values = client.query_values()
+            if current_values.hunger < float(pk["minimum_hunger"]):
+                self.log("每日 PK 批次暂停：体力低于 PK 阈值，自动照顾后继续")
+                self.activity("等待体力恢复后继续每日 PK")
+                return "pk_paused"
+            if current_values.clean < float(pk["minimum_clean"]):
+                self.log("每日 PK 批次暂停：清洁低于 PK 阈值，自动照顾后继续")
+                self.activity("等待清洁恢复后继续每日 PK")
+                return "pk_paused"
 
-            self.activity(
-                f"正在 PK：{opponent.nickname or opponent.pet_name or opponent_uin} "
-                f"（{self_power} 对 {opponent_power or '未知'}）"
-            )
-            result = client.perform_pk(
-                opponent_uin,
-                opponent_pet_id,
-                float(pk["wait_seconds"]),
-            )
-        except QQPetError as exc:
-            if opponent_uin and opponent_pet_id:
-                self.pk_progress.record_failure(
+            self.activity("每日 PK：正在比较双方战力")
+            opponent_uin = ""
+            opponent_pet_id = ""
+            try:
+                self_power = client.query_pk_power().power
+                opponent = self._select_pk_opponent(client, pk, self_power, now)
+                if opponent is None:
+                    reason = "没有符合筛选条件或剩余额度的好友宠物"
+                    self.pk_progress.mark_daily_run_completed(reason)
+                    self.log(f"每日 PK 批次完成：{reason}；今日成功 {self.pk_progress.succeeded()} 次")
+                    self.activity("今日自动 PK 已完成")
+                    return "pk" if completed_this_batch else "pk_completed"
+                opponent_uin = opponent.user_id
+                opponent_pet_id = opponent.pet_id
+                queried_opponent_power = client.query_pk_power(opponent_pet_id).power
+                opponent_power = queried_opponent_power or opponent.power
+                if (
+                    pk.get("only_weaker", True)
+                    and self_power > 0
+                    and opponent_power > 0
+                    and opponent_power >= self_power
+                ):
+                    self.pk_progress.record_failure(
+                        opponent_uin,
+                        opponent_pet_id,
+                        f"战力筛选：自身 {self_power}，对手 {opponent_power}",
+                        86400,
+                        block_all=mode == "fixed",
+                    )
+                    self.log(
+                        f"跳过 PK：自身战力 {self_power}，对手战力 {opponent_power}，"
+                        "已开启仅挑战更弱对手"
+                    )
+                    if mode == "fixed":
+                        self.pk_progress.mark_daily_run_completed("固定对手不符合战力筛选")
+                        return "pk_completed"
+                    continue
+
+                self.activity(
+                    f"每日 PK：{opponent.nickname or opponent.pet_name or opponent_uin} "
+                    f"（{self_power} 对 {opponent_power or '未知'}）"
+                )
+                result = client.perform_pk(
                     opponent_uin,
                     opponent_pet_id,
-                    str(exc),
-                    float(pk["retry_cooldown_seconds"]),
-                    block_all=mode == "fixed",
+                    float(pk["wait_seconds"]),
                 )
-            self.log(f"自动 PK 失败：{exc}；已进入重试冷却")
-            self.activity("PK 失败，等待冷却后重试")
-            return "pk_failed"
+            except QQPetError as exc:
+                if opponent_uin and opponent_pet_id:
+                    self.pk_progress.record_failure(
+                        opponent_uin,
+                        opponent_pet_id,
+                        str(exc),
+                        float(pk["retry_cooldown_seconds"]),
+                        block_all=mode == "fixed",
+                    )
+                else:
+                    self.pk_progress.mark_daily_run_completed(
+                        "PK 战力或好友接口读取失败"
+                    )
+                    self.log(f"自动 PK 批次读取失败：{exc}；今日不再自动重发")
+                    self.activity("今日自动 PK 已结束")
+                    return "pk_failed"
+                self.log(f"自动 PK 失败：{exc}；本次每日批次不重复发送该对手")
+                if mode == "fixed":
+                    self.pk_progress.mark_daily_run_completed("固定对手 PK 失败")
+                    self.activity("今日自动 PK 已结束")
+                    return "pk_failed"
+                continue
 
-        self.pk_progress.record_success(
-            result,
-            opponent.nickname or opponent.pet_name,
-            self_power,
-            opponent_power,
-        )
-        self.progress.increment("pk")
-        self.log(
-            f"PK 已由服务器验证：金币 {result.gold_delta:+.0f}，"
-            f"心情 {result.mood_delta:+.0f}，体力 -{result.hunger_cost:.0f}，"
-            f"清洁 -{result.clean_cost:.0f}，storyId={result.story_id}；"
-            f"今日成功 {self.pk_progress.succeeded()} 次"
-        )
-        self.activity("PK 结算完成，等待下一轮")
+            self.pk_progress.record_success(
+                result,
+                opponent.nickname or opponent.pet_name,
+                self_power,
+                opponent_power,
+            )
+            self.progress.increment("pk")
+            completed_this_batch += 1
+            self.log(
+                f"PK 已由服务器验证：金币 {result.gold_delta:+.0f}，"
+                f"心情 {result.mood_delta:+.0f}，体力 -{result.hunger_cost:.0f}，"
+                f"清洁 -{result.clean_cost:.0f}，storyId={result.story_id}；"
+                f"今日成功 {self.pk_progress.succeeded()} 次"
+            )
+
+        self.pk_progress.mark_daily_run_completed("已达到每日 PK 上限")
+        self.log(f"每日 PK 批次完成：今日成功 {self.pk_progress.succeeded()} 次")
+        self.activity("今日自动 PK 已完成")
         return "pk"
 
     def _select_pk_opponent(

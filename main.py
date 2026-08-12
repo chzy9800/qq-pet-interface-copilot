@@ -17,6 +17,7 @@ from qqpet_app.client import (
 from qqpet_app.config import ConfigStore
 from qqpet_app.friend_visits import FriendVisitProgress, eligible_friends
 from qqpet_app.friend_pet_cache import load_latest_friend_pet_capture
+from qqpet_app.interface_tests import InterfaceTestRunner
 from qqpet_app.notifications import NotificationManager
 from qqpet_app.scheduler import Scheduler
 from qqpet_app.single_instance import SingleInstance
@@ -53,8 +54,8 @@ SETTING_FIELDS = [
     ("adventure.enabled", "启用冒险", bool),
     ("adventure.start_time", "冒险开始时间 HH:MM", str),
     ("adventure.times_per_day", "每日冒险上限", int),
-    ("pk.enabled", "启用自动 PK", bool),
-    ("pk.start_time", "自动 PK 开始时间 HH:MM", str),
+    ("pk.enabled", "启用每日定时自动 PK", bool),
+    ("pk.start_time", "每日 PK 批次开始时间 HH:MM", str),
     ("pk.max_per_day", "每日 PK 上限（0 不限）", int),
     ("pk.opponent_mode", "对手来源 all_friends=全部好友 / fixed=固定", str),
     ("pk.friend_whitelist", "PK 好友白名单（空=全部）", str),
@@ -133,12 +134,13 @@ SETTING_SECTIONS = (
     ("school", "学习", ("school.",)),
     ("work", "打工", ("work.",)),
     ("adventure", "冒险", ("adventure.",)),
-    ("pk", "自动 PK", ("pk.",)),
+    ("pk", "每日定时 PK", ("pk.",)),
     ("friend_visits", "好友访问与踩踩", ("friend_visits.",)),
     ("friend_care", "好友自动照顾", ("friend_care.",)),
     ("story", "被雇佣召回", ("story.",)),
     ("notifications", "外部通知", ("notifications.",)),
     ("safety", "安全与真实操作", ("safety.",)),
+    ("interface_test", "接口测试", ("interface_test.",)),
 )
 
 
@@ -182,6 +184,22 @@ class MainWindow(tk.Tk):
         self.adventure_options: dict[str, str] = {
             "自动选择服务器当前可用冒险": ""
         }
+        self.test_food_var = tk.StringVar(value="默认饼干（已验证）")
+        self.test_food_options: dict[str, tuple[str, str]] = {
+            "默认饼干（已验证）": ("", "默认饼干")
+        }
+        self.test_bath_var = tk.StringVar(value="香皂片")
+        self.test_bath_options: dict[str, tuple[str, str]] = {
+            "香皂片": ("1", "香皂片"),
+            "沐浴球": ("2", "沐浴球"),
+        }
+        self.test_course_var = tk.StringVar(value="请先刷新接口目录")
+        self.test_job_var = tk.StringVar(value="请先刷新接口目录")
+        self.test_adventure_var = tk.StringVar(value="请先刷新接口目录")
+        self.interface_test_status_var = tk.StringVar(
+            value="先点击“刷新全部接口目录”，再选择目标进行单次测试。"
+        )
+        self.interface_test_buttons: list[ttk.Button] = []
         self.manual_pk_friend_var = tk.StringVar(value="请先刷新好友")
         self.manual_pk_uin_var = tk.StringVar()
         self.manual_pk_pet_id_var = tk.StringVar()
@@ -654,9 +672,96 @@ class MainWindow(tk.Tk):
         self.adventure_status_label.grid(
             row=adventure_row + 1, column=1, sticky="w", padx=6, pady=(0, 5)
         )
+        self._build_interface_test_section(section_frames["interface_test"])
         ttk.Button(form, text="保存全部设置并立即生效", command=self._save_settings).pack(
             fill=tk.X, padx=6, pady=(10, 18)
         )
+
+    def _build_interface_test_section(self, section: ttk.Frame) -> None:
+        ttk.Label(
+            section,
+            text=(
+                "这里用于逐项定位协议问题。灰色检查按钮只读取服务器；红色“真实测试”按钮会立刻"
+                "消耗道具或启动任务。学习、打工、冒险一旦成功，会占用主任务直到倒计时结束。"
+            ),
+            foreground="#b24a3a",
+            wraplength=720,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=6, pady=(2, 12))
+
+        def add_button(row: int, text: str, command) -> ttk.Button:
+            button = ttk.Button(section, text=text, command=command)
+            button.grid(row=row, column=2, sticky="ew", padx=6, pady=5)
+            self.interface_test_buttons.append(button)
+            return button
+
+        ttk.Label(section, text="基础读取").grid(row=1, column=0, sticky="w", padx=6, pady=5)
+        ttk.Label(section, text="状态、库存与服务器岗位规则").grid(
+            row=1, column=1, sticky="w", padx=6, pady=5
+        )
+        add_button(1, "只读检查状态", lambda: self._run_interface_test("state"))
+
+        ttk.Label(section, text="接口目录").grid(row=2, column=0, sticky="w", padx=6, pady=5)
+        ttk.Label(section, text="食物 / 洗护 / 课程 / 岗位 / 冒险").grid(
+            row=2, column=1, sticky="w", padx=6, pady=5
+        )
+        add_button(2, "刷新并检查全部目录", self._refresh_interface_test_catalogs)
+
+        ttk.Label(section, text="喂食物品").grid(row=3, column=0, sticky="w", padx=6, pady=5)
+        self.test_food_combo = ttk.Combobox(
+            section,
+            textvariable=self.test_food_var,
+            state="readonly",
+            values=tuple(self.test_food_options),
+            width=45,
+        )
+        self.test_food_combo.grid(row=3, column=1, sticky="ew", padx=6, pady=5)
+        add_button(3, "真实测试：立即喂食", lambda: self._run_interface_test("feed"))
+
+        ttk.Label(section, text="洗护物品").grid(row=4, column=0, sticky="w", padx=6, pady=5)
+        self.test_bath_combo = ttk.Combobox(
+            section,
+            textvariable=self.test_bath_var,
+            state="readonly",
+            values=tuple(self.test_bath_options),
+            width=45,
+        )
+        self.test_bath_combo.grid(row=4, column=1, sticky="ew", padx=6, pady=5)
+        add_button(4, "真实测试：立即洗澡", lambda: self._run_interface_test("wash"))
+
+        ttk.Label(section, text="学习课程").grid(row=5, column=0, sticky="w", padx=6, pady=5)
+        self.test_course_combo = ttk.Combobox(
+            section, textvariable=self.test_course_var, state="readonly", width=45
+        )
+        self.test_course_combo.grid(row=5, column=1, sticky="ew", padx=6, pady=5)
+        add_button(5, "真实测试：立即开课", lambda: self._run_interface_test("school"))
+
+        ttk.Label(section, text="打工岗位").grid(row=6, column=0, sticky="w", padx=6, pady=5)
+        self.test_job_combo = ttk.Combobox(
+            section, textvariable=self.test_job_var, state="readonly", width=45
+        )
+        self.test_job_combo.grid(row=6, column=1, sticky="ew", padx=6, pady=5)
+        add_button(6, "真实测试：立即开工", lambda: self._run_interface_test("work"))
+
+        ttk.Label(section, text="冒险项目").grid(row=7, column=0, sticky="w", padx=6, pady=5)
+        self.test_adventure_combo = ttk.Combobox(
+            section, textvariable=self.test_adventure_var, state="readonly", width=45
+        )
+        self.test_adventure_combo.grid(row=7, column=1, sticky="ew", padx=6, pady=5)
+        add_button(7, "真实测试：立即冒险", lambda: self._run_interface_test("adventure"))
+
+        ttk.Separator(section).grid(
+            row=8, column=0, columnspan=3, sticky="ew", padx=6, pady=(12, 8)
+        )
+        ttk.Label(section, text="最近结果").grid(row=9, column=0, sticky="nw", padx=6, pady=5)
+        ttk.Label(
+            section,
+            textvariable=self.interface_test_status_var,
+            wraplength=700,
+            justify=tk.LEFT,
+            foreground="#5d5568",
+        ).grid(row=9, column=1, columnspan=2, sticky="w", padx=6, pady=5)
+        section.columnconfigure(1, weight=1)
 
     def _metric_card(
         self,
@@ -1195,6 +1300,128 @@ class MainWindow(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _set_interface_test_busy(self, busy: bool) -> None:
+        state = tk.DISABLED if busy else tk.NORMAL
+        for button in self.interface_test_buttons:
+            button.configure(state=state)
+
+    def _refresh_interface_test_catalogs(self) -> None:
+        self._set_interface_test_busy(True)
+        self.interface_test_status_var.set("正在读取全部服务器接口目录…")
+
+        def worker() -> None:
+            try:
+                config = self.config_store.data
+                client = Scheduler._make_client(config)
+                runner = InterfaceTestRunner(client, config)
+                work_result = runner.check_work_rules()
+                food_items = client.query_food_items()
+                food_inventory = client.query_food_inventory()
+                bath_items = client.query_bath_items()
+                bath_inventory = client.query_bath_inventory()
+                stage = client.query_school_stage()
+                courses = tuple(item for item in client.query_school_courses(stage) if item.can_do)
+                overview = client.query_work_overview()
+                jobs = []
+                rejected = []
+                for career in overview.careers:
+                    if not career.available:
+                        continue
+                    try:
+                        jobs.extend(client.query_work_jobs(career.career_type))
+                    except Exception as exc:
+                        rejected.append(f"{career.name or career.career_type}: {exc}")
+                jobs = tuple(item for item in jobs if item.can_do and item.sub_event_type > 0)
+                adventures = tuple(item for item in client.query_adventure_options() if item.can_do)
+                self.events.put(
+                    (
+                        "interface_catalogs",
+                        (
+                            food_items,
+                            food_inventory,
+                            bath_items,
+                            bath_inventory,
+                            stage,
+                            courses,
+                            jobs,
+                            adventures,
+                            rejected,
+                            work_result,
+                        ),
+                    )
+                )
+            except Exception as exc:
+                self.events.put(("interface_catalogs_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_interface_test(self, action: str) -> None:
+        selections: dict[str, Any] = {}
+        try:
+            if action == "feed":
+                selections["food"] = self.test_food_options[self.test_food_var.get()]
+            elif action == "wash":
+                selections["bath"] = self.test_bath_options[self.test_bath_var.get()]
+            elif action == "school":
+                label = self.test_course_var.get()
+                sub_event = int(self.course_options.get(label, 0))
+                if not sub_event:
+                    raise ValueError("请先刷新目录并选择一门具体课程")
+                selections.update(label=label, sub_event=sub_event)
+            elif action == "work":
+                label = self.test_job_var.get()
+                career_type, sub_event = self.job_options.get(label, (0, 0))
+                if not career_type or not sub_event:
+                    raise ValueError("请先刷新目录并选择一个具体岗位")
+                selections.update(label=label, career_type=career_type, sub_event=sub_event)
+            elif action == "adventure":
+                label = self.test_adventure_var.get()
+                option_name = self.adventure_options.get(label, "")
+                if not option_name:
+                    raise ValueError("请先刷新目录并选择一个具体冒险")
+                selections.update(label=label, option_name=option_name)
+        except (KeyError, TypeError, ValueError) as exc:
+            self._show_notice("无法测试接口", str(exc), "warning")
+            return
+
+        self._set_interface_test_busy(True)
+        action_name = {
+            "state": "状态读取",
+            "feed": "喂食",
+            "wash": "洗澡",
+            "school": "学习开课",
+            "work": "打工开工",
+            "adventure": "冒险启动",
+        }[action]
+        self.interface_test_status_var.set(f"正在执行：{action_name}…")
+        self._append_log(f"[{datetime.now():%H:%M:%S}] 接口单项测试开始：{action_name}")
+
+        def worker() -> None:
+            try:
+                config = self.config_store.data
+                runner = InterfaceTestRunner(Scheduler._make_client(config), config)
+                if action == "state":
+                    result = runner.check_state()
+                elif action == "feed":
+                    result = runner.feed(*selections["food"])
+                elif action == "wash":
+                    result = runner.wash(*selections["bath"])
+                elif action == "school":
+                    result = runner.start_school(selections["sub_event"], selections["label"])
+                elif action == "work":
+                    result = runner.start_work(
+                        selections["career_type"], selections["sub_event"], selections["label"]
+                    )
+                else:
+                    result = runner.start_adventure(
+                        selections["option_name"], selections["label"]
+                    )
+                self.events.put(("interface_test_done", result))
+            except Exception as exc:
+                self.events.put(("interface_test_error", (action_name, str(exc))))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _test_external_notifications(self) -> None:
         try:
             config = self.config_store.data
@@ -1638,7 +1865,10 @@ class MainWindow(tk.Tk):
         try:
             while True:
                 kind, payload = self.events.get_nowait()
-                if kind.endswith("_error") and kind != "manual_pk_batch_error":
+                if kind.endswith("_error") and kind not in {
+                    "manual_pk_batch_error",
+                    "interface_test_error",
+                }:
                     self._show_notice("操作失败", str(payload), "error")
                 if kind == "log":
                     self._append_log(payload)
@@ -1674,6 +1904,118 @@ class MainWindow(tk.Tk):
                     self.external_notification_test_button.configure(state=tk.NORMAL)
                 elif kind == "external_notification_test_error":
                     self.external_notification_test_button.configure(state=tk.NORMAL)
+                elif kind == "interface_catalogs":
+                    (
+                        food_items,
+                        food_inventory,
+                        bath_items,
+                        bath_inventory,
+                        stage,
+                        courses,
+                        jobs,
+                        adventures,
+                        rejected,
+                        work_result,
+                    ) = payload
+                    food_options = {}
+                    for item in food_items:
+                        label = f"{item.name}｜库存 {item.balance}｜foodId {item.food_id}"
+                        food_options[label] = (item.food_id, item.name)
+                    if not food_options:
+                        food_options[
+                            f"默认饼干（库存 {food_inventory.biscuits}，已验证）"
+                        ] = ("", "默认饼干")
+                    self.test_food_options = food_options
+                    self.test_food_combo.configure(values=tuple(food_options))
+                    self.test_food_var.set(next(iter(food_options)))
+
+                    bath_names = {item.item_id: item.name for item in bath_items}
+                    bath_options = {}
+                    for item_id, fallback in (("1", "香皂片"), ("2", "沐浴球")):
+                        name = bath_names.get(item_id, fallback)
+                        label = f"{name}｜库存 {bath_inventory.count(item_id)}｜itemId {item_id}"
+                        bath_options[label] = (item_id, name)
+                    self.test_bath_options = bath_options
+                    self.test_bath_combo.configure(values=tuple(bath_options))
+                    self.test_bath_var.set(next(iter(bath_options)))
+
+                    course_options = {
+                        f"{item.name}｜{item.duration}｜{item.reward}": item.sub_event_type
+                        for item in courses
+                    }
+                    self.course_options.update(course_options)
+                    self.test_course_combo.configure(values=tuple(course_options))
+                    self.test_course_var.set(
+                        next(iter(course_options), "当前阶段没有可执行课程")
+                    )
+
+                    job_options = {
+                        f"{item.career_name}｜{item.name}｜{item.duration}｜收益 {item.reward}": (
+                            item.career_type,
+                            item.sub_event_type,
+                        )
+                        for item in jobs
+                    }
+                    self.job_options.update(job_options)
+                    self.test_job_combo.configure(values=tuple(job_options))
+                    self.test_job_var.set(next(iter(job_options), "当前没有可执行岗位"))
+
+                    adventure_options = {
+                        f"{item.name}｜{item.duration}｜{item.cost}": item.name
+                        for item in adventures
+                    }
+                    self.adventure_options.update(adventure_options)
+                    self.test_adventure_combo.configure(values=tuple(adventure_options))
+                    self.test_adventure_var.set(
+                        next(iter(adventure_options), "当前没有可执行冒险")
+                    )
+                    stage_name = {
+                        0: "学前辅导",
+                        1: "初级学园",
+                        2: "中级学园",
+                        3: "高级学园",
+                        4: "进修学院",
+                    }.get(stage, f"阶段 {stage}")
+                    rejected_text = f"；拒绝 {len(rejected)} 个职业" if rejected else ""
+                    food_note = ""
+                    if food_inventory.shrimp > 0 and not any(
+                        "虾" in item.name for item in food_items
+                    ):
+                        food_note = (
+                            f"；虾仁库存 {food_inventory.shrimp}，但本次目录未下发其 foodId，"
+                            "因此未开放虾仁真实测试"
+                        )
+                    detail = (
+                        f"目录刷新成功：食物 {len(food_items)}、洗护 {len(bath_items)}、"
+                        f"{stage_name}课程 {len(courses)}、可执行岗位 {len(jobs)}、"
+                        f"冒险 {len(adventures)}{rejected_text}{food_note}。{work_result.detail}"
+                    )
+                    self.interface_test_status_var.set(detail)
+                    self._append_log(f"[{datetime.now():%H:%M:%S}] 接口目录检查：{detail}")
+                    self._set_interface_test_busy(False)
+                elif kind == "interface_catalogs_error":
+                    self.interface_test_status_var.set(f"接口目录刷新失败：{payload}")
+                    self._set_interface_test_busy(False)
+                elif kind == "interface_test_done":
+                    result = payload
+                    outcome = "成功" if result.succeeded else "未验证生效"
+                    detail = f"{result.action}｜{result.target}｜{outcome}：{result.detail}"
+                    self.interface_test_status_var.set(detail)
+                    self._append_log(f"[{datetime.now():%H:%M:%S}] 接口单项测试：{detail}")
+                    self._show_notice(
+                        "接口测试成功" if result.succeeded else "接口返回但未验证生效",
+                        detail,
+                        "success" if result.succeeded else "warning",
+                        10000,
+                    )
+                    self._set_interface_test_busy(False)
+                elif kind == "interface_test_error":
+                    action_name, error = payload
+                    detail = f"{action_name}失败：{error}"
+                    self.interface_test_status_var.set(detail)
+                    self._append_log(f"[{datetime.now():%H:%M:%S}] 接口单项测试失败：{detail}")
+                    self._show_notice("接口测试失败", detail, "error", 10000)
+                    self._set_interface_test_busy(False)
                 elif kind == "own_pet_profile":
                     profile = payload
                     self.setting_vars["account.uin"][0].set(profile.user_id)
@@ -1730,6 +2072,11 @@ class MainWindow(tk.Tk):
                         f"成功 {pk_summary.get('success', 0)} / "
                         f"失败 {pk_summary.get('failed', 0)} / "
                         f"金币 {pk_summary.get('gold_earned', 0):.0f}"
+                        + (
+                            " / 今日批次已完成"
+                            if pk_summary.get("daily_run_completed")
+                            else " / 等待每日批次"
+                        )
                         + (f" / {pool_text}" if pool_text else "")
                     )
                     visit_summary = state.get("friend_visit_summary", {})

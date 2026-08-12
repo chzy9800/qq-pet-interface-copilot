@@ -806,6 +806,33 @@ class ProtoAndClientTests(unittest.TestCase):
         self.assertEqual(inventory.shrimp, 10)
         self.assertEqual(inventory.total, 22)
 
+    def test_food_catalog_and_selected_food_packet_use_server_food_id(self) -> None:
+        calls = 0
+
+        def transport(command: str, data: str) -> dict:
+            nonlocal calls
+            calls += 1
+            outer = parse_message(bytes.fromhex(data))
+            request = parse_message(first_bytes(outer, 4))
+            if calls == 1:
+                self.assertEqual(command, "OidbSvcTrpcTcp.0x9949_1")
+                item = (
+                    field_varint(1, 7)
+                    + field_varint(2, 9990032)
+                    + field_string(3, "虾仁")
+                    + field_string(4, "1000001")
+                )
+                return oidb_response(39241, 1, field_bytes(4, item))
+            self.assertEqual(command, "OidbSvcTrpcTcp.0x992d_1")
+            self.assertEqual(first_string(request, 4), "pet")
+            self.assertEqual(first_string(request, 11), "1000001")
+            return oidb_response(39213, 1, b"ok")
+
+        client = NapCatClient("http://unused", "token", "pet", transport=transport)
+        items = client.query_food_items()
+        self.assertEqual((items[0].name, items[0].balance), ("虾仁", 7))
+        client.feed(items[0].food_id)
+
     def test_bath_shop_and_inventory_are_decoded(self) -> None:
         soap = (
             field_string(1, "香皂片")

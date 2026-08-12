@@ -458,6 +458,25 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(saved["success"], 1)
             self.assertEqual(saved["gold_earned"], 42)
             self.assertTrue(saved["records"][0]["verified"])
+            self.assertTrue(saved["daily_run_completed"])
+            self.assertTrue(saved["daily_run_completed_at"])
+
+    def test_auto_pk_does_not_start_before_daily_scheduled_time(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["pk"].update({"enabled": True, "start_time": "21:00"})
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            result = scheduler._run_pk_if_due(
+                object(),
+                config,
+                PetValues(hunger=100, clean=100),
+                datetime(2026, 8, 12, 20, 59),
+            )
+            self.assertIsNone(result)
+            self.assertFalse(scheduler.pk_progress.daily_run_completed())
 
     def test_auto_pk_runs_while_primary_story_is_active(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -611,9 +630,10 @@ class ProgressAndSchedulerTests(unittest.TestCase):
                 root / "progress.json",
                 client_factory=lambda _config: fake,
             )
-            for _ in range(4):
-                self.assertEqual(scheduler.run_once(), "pk")
+            self.assertEqual(scheduler.run_once(), "pk")
+            self.assertIsNone(scheduler.run_once())
             self.assertEqual(fake.opponents, ["10002", "10002", "10002", "10001"])
+            self.assertTrue(scheduler.pk_progress.daily_run_completed())
 
     def test_daily_friend_scan_runs_once_after_configured_time(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

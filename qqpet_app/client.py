@@ -105,6 +105,14 @@ class FoodInventory:
 
 
 @dataclass(frozen=True)
+class FoodItem:
+    food_id: str
+    name: str
+    balance: int
+    resource_id: int = 0
+
+
+@dataclass(frozen=True)
 class BathItem:
     item_id: str
     name: str
@@ -691,8 +699,35 @@ class NapCatClient:
         gold_value = first_float(parse_message(first_bytes(gold_root, 5)), 3)
         return PetValues(current(1), current(2), current(3), current(4), gold_value)
 
-    def feed(self) -> OidbResponse:
-        return self.send_oidb(*self.FEED, field_string(4, self.pet_id))
+    def feed(self, food_id: str = "") -> OidbResponse:
+        body = field_string(4, self.pet_id)
+        if food_id:
+            # Android's PetFeed_Feeding request selects an inventory item with
+            # protobuf field 11. An empty value keeps the verified default
+            # biscuit behavior used by earlier releases.
+            body += field_string(11, str(food_id))
+        return self.send_oidb(*self.FEED, body)
+
+    def query_food_items(self) -> tuple[FoodItem, ...]:
+        response = self.send_oidb_read(*self.FEED_TIMES, b"").body
+        root = parse_message(response)
+        items: list[FoodItem] = []
+        for value in root.get(4, []):
+            if value.wire_type != 2:
+                continue
+            item = parse_message(bytes(value.value))
+            food_id = first_string(item, 4)
+            if not food_id:
+                continue
+            items.append(
+                FoodItem(
+                    food_id=food_id,
+                    name=first_string(item, 3) or f"食物 {food_id}",
+                    balance=first_varint(item, 1),
+                    resource_id=first_varint(item, 2),
+                )
+            )
+        return tuple(items)
 
     def query_food_inventory(self) -> FoodInventory:
         # 手机 QQ 9.3.35 的真实响应中：根字段 1=饼干；根字段 2 是
