@@ -24,6 +24,7 @@ from qqpet_app.client import (
     SchoolStartResult,
     StoryStatus,
     WorkJob,
+    WorkEligibilityError,
     WorkStartResult,
 )
 from qqpet_app.config import ConfigStore
@@ -32,6 +33,141 @@ from qqpet_app.scheduler import Scheduler
 
 
 class ProgressAndSchedulerTests(unittest.TestCase):
+    def test_work_eligibility_error_falls_back_to_next_job_once(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["scheduler"]["coin_threshold"] = 500
+            config["adventure"]["enabled"] = False
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            config["work"]["employ_friend"] = False
+            store.save(config)
+
+            rejected = WorkJob(
+                3, "高级职业", "高级岗位", 6433001, "金币 600", "4小时", can_do=True
+            )
+            fallback = WorkJob(
+                1, "基础职业", "基础岗位", 6411001, "金币 100", "1小时", can_do=True
+            )
+
+            class FakeClient:
+                calls: list[int] = []
+
+                def query_values(self):
+                    return PetValues(gold=1, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=12, shrimp=1)
+
+                def select_work_job(
+                    self,
+                    _career_type,
+                    _preferred_sub_event,
+                    _strategy,
+                    _hired_pet_id,
+                    excluded_sub_events=(),
+                ):
+                    self.excluded = tuple(excluded_sub_events)
+                    return fallback
+
+                def start_work(
+                    self,
+                    career_type,
+                    preferred_sub_event,
+                    _strategy,
+                    _hired_user_id,
+                    _hired_pet_id,
+                ):
+                    selected = preferred_sub_event or rejected.sub_event_type
+                    self.calls.append(selected)
+                    if selected == rejected.sub_event_type:
+                        raise WorkEligibilityError(
+                            "你的宠物还未达到该职业参与要求", rejected
+                        )
+                    return WorkStartResult(fallback, "6400_fallback")
+
+            fake = FakeClient()
+            logs: list[str] = []
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                log=logs.append,
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "work")
+            self.assertEqual(fake.calls, [6433001, 6411001])
+            self.assertEqual(fake.excluded, (6433001,))
+            self.assertTrue(any("正在尝试下一可用岗位" in line for line in logs))
+
+    def test_work_eligibility_failure_is_cooled_down_between_scheduler_rounds(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["scheduler"]["coin_threshold"] = 500
+            config["adventure"]["enabled"] = False
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            config["work"]["employ_friend"] = False
+            config["care"]["failure_cooldown_seconds"] = 600
+            store.save(config)
+
+            rejected = WorkJob(
+                3, "高级职业", "高级岗位", 6433001, "金币 600", "4小时", can_do=True
+            )
+
+            class FakeClient:
+                start_calls = 0
+                select_calls = 0
+
+                def query_values(self):
+                    return PetValues(gold=1, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=12, shrimp=1)
+
+                def select_work_job(
+                    self,
+                    _career_type,
+                    _preferred_sub_event,
+                    _strategy,
+                    _hired_pet_id,
+                    excluded_sub_events=(),
+                ):
+                    self.select_calls += 1
+                    if excluded_sub_events:
+                        raise WorkEligibilityError("没有符合当前宠物条件的开放岗位")
+                    return rejected
+
+                def start_work(self, *_args):
+                    self.start_calls += 1
+                    raise WorkEligibilityError(
+                        "你的宠物还未达到该职业参与要求", rejected
+                    )
+
+            fake = FakeClient()
+            logs: list[str] = []
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                log=logs.append,
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "work_unavailable")
+            self.assertEqual(scheduler.run_once(), "work_blocked")
+            self.assertEqual(fake.start_calls, 1)
+            self.assertEqual(fake.select_calls, 1)
+            self.assertTrue(any("600s 后重新读取" in line for line in logs))
+            self.assertTrue(any("打工资格暂不可用" in line for line in logs))
+
     def test_friend_care_feeds_only_listed_hungry_friend_and_verifies_change(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

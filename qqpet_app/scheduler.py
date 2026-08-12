@@ -15,6 +15,7 @@ from .client import (
     QQPetEmptyResponse,
     QQPetError,
     StoryStatus,
+    WorkEligibilityError,
 )
 from .config import ConfigStore
 from .friend_visits import FriendVisitProgress, eligible_friends, parse_uin_list
@@ -781,6 +782,18 @@ class Scheduler:
             self.activity(f"已开课：{course.name}，等待倒计时确认")
             return action
         if action == "work":
+            requirement_block = self.progress.active_care_block("work_requirements")
+            if requirement_block:
+                remaining = max(
+                    0,
+                    int(
+                        float(requirement_block["until"])
+                        - datetime.now().astimezone().timestamp()
+                    ),
+                )
+                self.log(f"打工资格暂不可用；{remaining}s 后重新读取职业规则")
+                self.activity("等待宠物满足打工职业要求")
+                return "work_blocked"
             self.activity("正在获取开放职业和岗位")
             career_type = int(config["work"].get("career_type", 0))
             preferred_job = int(config["work"].get("job_sub_event", 0))
@@ -798,12 +811,27 @@ class Scheduler:
                         hired_pet_id,
                     )
                 except QQPetError:
-                    selected_job = client.select_work_job(
-                        0,
-                        0,
-                        strategy,
-                        hired_pet_id,
-                    )
+                    try:
+                        selected_job = client.select_work_job(
+                            0,
+                            0,
+                            strategy,
+                            hired_pet_id,
+                        )
+                    except WorkEligibilityError as exc:
+                        cooldown = max(
+                            300.0,
+                            float(config["care"]["failure_cooldown_seconds"]),
+                        )
+                        self.progress.set_care_block(
+                            "work_requirements", str(exc), cooldown
+                        )
+                        self.log(
+                            f"{exc}；本轮没有符合条件的岗位，"
+                            f"{int(cooldown)}s 后重新读取"
+                        )
+                        self.activity("暂无符合宠物条件的打工岗位")
+                        return "work_unavailable"
                     self.log(
                         f"指定岗位 {preferred_job} 当前不可用，"
                         "已自动回退到服务器最高收益岗位"
@@ -811,14 +839,46 @@ class Scheduler:
                     preferred_job = 0
             start_career = selected_job.career_type if selected_job else career_type
             start_job = selected_job.sub_event_type if selected_job else preferred_job
+            rejected_jobs: list[int] = []
             try:
-                result = client.start_work(
-                    start_career,
-                    start_job,
-                    strategy,
-                    hired_uin,
-                    hired_pet_id,
+                while True:
+                    try:
+                        result = client.start_work(
+                            start_career,
+                            start_job,
+                            strategy,
+                            hired_uin,
+                            hired_pet_id,
+                        )
+                        break
+                    except WorkEligibilityError as exc:
+                        if exc.job is None:
+                            raise
+                        rejected_jobs.append(exc.job.sub_event_type)
+                        self.log(
+                            f"岗位“{exc.job.name}”被服务器判定为尚未满足参与要求，"
+                            "正在尝试下一可用岗位"
+                        )
+                        fallback = client.select_work_job(
+                            0,
+                            0,
+                            strategy,
+                            hired_pet_id,
+                            tuple(rejected_jobs),
+                        )
+                        start_career = fallback.career_type
+                        start_job = fallback.sub_event_type
+                        preferred_job = 0
+            except WorkEligibilityError as exc:
+                cooldown = max(300.0, float(config["care"]["failure_cooldown_seconds"]))
+                self.progress.set_care_block(
+                    "work_requirements", str(exc), cooldown
                 )
+                self.log(
+                    f"{exc}；本轮没有符合条件的岗位，{int(cooldown)}s 后重新读取"
+                )
+                self.activity("暂无符合宠物条件的打工岗位")
+                return "work_unavailable"
             except (QQPetEmptyResponse, QQPetConnectionError) as exc:
                 if exc.command_name != "OidbSvcTrpcTcp.0x975e_1":
                     raise
@@ -830,6 +890,7 @@ class Scheduler:
                 self.activity("开工结果待确认，正在等待服务器状态")
                 return action
             self.progress.set_pending("work")
+            self.progress.clear_care_block("work_requirements")
             job = result.job
             response_story = f"，storyId={result.story_id}" if result.story_id else ""
             selection = "指定" if preferred_job else "总收益最高"

@@ -4,6 +4,7 @@ import unittest
 
 from qqpet_app.mobile_protocol import (
     MobileProtocolReader,
+    MobileProtocolServerError,
     frida_architecture,
     select_adb_serial,
 )
@@ -11,6 +12,24 @@ from qqpet_app.proto import field_bytes, field_fixed32
 
 
 class MobileProtocolTests(unittest.TestCase):
+    def test_write_server_error_preserves_numeric_code(self) -> None:
+        reader = MobileProtocolReader(".")
+        reader._connect = lambda: None  # type: ignore[method-assign]
+
+        class Exports:
+            @staticmethod
+            def send_oidb_write_once(*_args):
+                return {"code": 135061, "message": "你的宠物还未达到该职业参与要求"}
+
+        class Script:
+            exports_sync = Exports()
+
+        reader._script = Script()
+        with self.assertRaises(MobileProtocolServerError) as raised:
+            reader.send_oidb_write_once(*reader.STORY_START, b"")
+        self.assertEqual(raised.exception.code, 135061)
+        self.assertIn("职业参与要求", str(raised.exception))
+
     def test_select_adb_serial_prefers_configured_online_device(self) -> None:
         output = "List of devices attached\n127.0.0.1:16384\tdevice\nemulator-5554\tdevice\n"
         self.assertEqual(select_adb_serial(output, "emulator-5554"), "emulator-5554")

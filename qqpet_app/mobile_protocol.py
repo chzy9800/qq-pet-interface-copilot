@@ -39,6 +39,17 @@ class MobileProtocolUnavailable(QQPetError):
     """The local Android QQ read bridge is unavailable."""
 
 
+class MobileProtocolServerError(MobileProtocolUnavailable):
+    """Android QQ returned a structured server-side error."""
+
+    def __init__(self, code: int, detail: str = "", *, write: bool = False) -> None:
+        self.code = int(code)
+        self.detail = detail.strip()
+        action = "写入返回错误" if write else "返回错误"
+        suffix = f"：{self.detail}" if self.detail else ""
+        super().__init__(f"手机 QQ {action} {self.code}{suffix}")
+
+
 def _mumu_install_locations() -> list[Path]:
     locations: list[Path] = []
     if sys.platform == "win32":
@@ -478,9 +489,7 @@ class MobileProtocolReader:
                     raw = bytes.fromhex(str(result.get("data_hex") or ""))
                     if code != 0:
                         detail = str(result.get("message") or "")
-                        raise MobileProtocolUnavailable(
-                            f"手机 QQ 返回错误 {code}" + (f"：{detail}" if detail else "")
-                        )
+                        raise MobileProtocolServerError(code, detail)
                     if not raw:
                         raise MobileProtocolUnavailable("手机 QQ 返回空响应")
                     return raw
@@ -521,9 +530,7 @@ class MobileProtocolReader:
             code = int(result.get("code", -1))
             if code != 0:
                 detail = str(result.get("message") or "")
-                raise MobileProtocolUnavailable(
-                    f"手机 QQ 写入返回错误 {code}" + (f"：{detail}" if detail else "")
-                )
+                raise MobileProtocolServerError(code, detail, write=True)
             return bytes.fromhex(str(result.get("data_hex") or ""))
 
     def get_self_uin(self) -> str:

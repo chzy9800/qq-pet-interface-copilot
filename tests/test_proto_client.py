@@ -18,7 +18,10 @@ from qqpet_app.client import (
     SchoolCourse,
     StoryStatus,
     WorkJob,
+    WorkCareer,
+    WorkOverview,
 )
+from qqpet_app.mobile_protocol import MobileProtocolServerError
 from qqpet_app.proto import (
     field_bytes,
     field_fixed32,
@@ -37,6 +40,36 @@ def oidb_response(command: int, sub: int, body: bytes) -> dict:
 
 
 class ProtoAndClientTests(unittest.TestCase):
+    def test_work_selection_skips_server_rejected_career(self) -> None:
+        client = NapCatClient("http://unused", "token", "pet")
+        client.query_work_overview = lambda: WorkOverview(  # type: ignore[method-assign]
+            careers=(
+                WorkCareer(1, "高级职业", available=True),
+                WorkCareer(2, "基础职业", available=True),
+            )
+        )
+
+        def jobs(career_type: int, _hired_pet_id: str = ""):
+            if career_type == 1:
+                raise MobileProtocolServerError(
+                    135061, "你的宠物还未达到该职业参与要求"
+                )
+            return (
+                WorkJob(
+                    2,
+                    "基础职业",
+                    "入门岗位",
+                    6422001,
+                    "金币 100",
+                    "1小时",
+                    can_do=True,
+                ),
+            )
+
+        client.query_work_jobs = jobs  # type: ignore[method-assign]
+        selected = client.select_work_job()
+        self.assertEqual(selected.sub_event_type, 6422001)
+
     def test_http_packet_transport_explicitly_waits_for_response(self) -> None:
         client = NapCatClient("http://unused", "token", "pet")
         calls = []
