@@ -7,8 +7,11 @@ from qqpet_app.client import (
     FoodInventory,
     FoodItem,
     PetValues,
+    OidbResponse,
     QQPetError,
     StoryStatus,
+    WorkJob,
+    WorkStartResult,
 )
 from qqpet_app.config import DEFAULT_CONFIG
 from qqpet_app.interface_tests import InterfaceTestRunner
@@ -63,6 +66,55 @@ class InterfaceTestRunnerTests(unittest.TestCase):
         with self.assertRaises(QQPetError) as raised:
             InterfaceTestRunner(object(), config).wash("1", "香皂片")
         self.assertIn("安全模式", str(raised.exception))
+
+    def test_work_hire_sends_selected_friend_identity(self) -> None:
+        class FakeClient:
+            started = None
+
+            def query_story(self):
+                return StoryStatus() if self.started is None else StoryStatus("6400-hired", 51, 90, 100)
+
+            def start_work(
+                self, career_type, sub_event, strategy, hired_user_id, hired_pet_id
+            ):
+                self.started = (hired_user_id, hired_pet_id)
+                return WorkStartResult(
+                    WorkJob(career_type, "职业", "岗位", sub_event, can_do=True),
+                    "6400-hired",
+                    hired_friend=True,
+                )
+
+        config = {key: dict(value) for key, value in DEFAULT_CONFIG.items()}
+        config["safety"]["safe_mode"] = False
+        config["safety"]["allow_experimental_scene_actions"] = True
+        client = FakeClient()
+        result = InterfaceTestRunner(client, config).start_work(
+            8, 6481001, "替摊主看摊", "10001", "pet-one", "好友甲"
+        )
+        self.assertTrue(result.succeeded)
+        self.assertEqual(client.started, ("10001", "pet-one"))
+        self.assertIn("好友甲", result.detail)
+
+    def test_recall_employed_verifies_story_is_cleared(self) -> None:
+        class FakeClient:
+            recalled = False
+
+            def query_story(self):
+                if self.recalled:
+                    return StoryStatus()
+                return StoryStatus("6500_employed", 51, 75, 100, recallable=True)
+
+            def settle_story(self, story_id):
+                self.recalled = True
+                return OidbResponse(38752, 1, 0, b"verified", b"raw")
+
+        config = {key: dict(value) for key, value in DEFAULT_CONFIG.items()}
+        config["safety"]["safe_mode"] = False
+        config["safety"]["allow_experimental_scene_actions"] = True
+        config["care"]["verify_delay_seconds"] = 0
+        result = InterfaceTestRunner(FakeClient(), config).recall_employed()
+        self.assertTrue(result.succeeded)
+        self.assertIn("6500_employed", result.detail)
 
 
 if __name__ == "__main__":

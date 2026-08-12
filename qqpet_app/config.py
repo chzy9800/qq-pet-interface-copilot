@@ -46,6 +46,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "strategy": "highest_total",
         "times_per_day": 0,
         "employ_friend": True,
+        "hire_mode": "auto",
+        "hire_friend_uin": "",
+        "hire_friend_pet_id": "",
+        "hire_friend_name": "",
     },
     "adventure": {
         "enabled": True,
@@ -197,6 +201,12 @@ class ConfigStore:
             raise ValueError("work.job_sub_event 不能小于 0")
         if config["work"].get("strategy", "highest_total") != "highest_total":
             raise ValueError("work.strategy 目前仅支持 highest_total")
+        if config["work"].get("hire_mode", "auto") not in {"auto", "manual"}:
+            raise ValueError("work.hire_mode 必须是 auto/manual")
+        hire_uin = str(config["work"].get("hire_friend_uin", "")).strip()
+        hire_pet_id = str(config["work"].get("hire_friend_pet_id", "")).strip()
+        if bool(hire_uin) != bool(hire_pet_id):
+            raise ValueError("手动雇佣好友必须同时保存 QQ 号和宠物 ID")
         if not isinstance(config["adventure"].get("option_name", ""), str):
             raise ValueError("adventure.option_name 必须是字符串")
         hours, minutes = map(int, str(config["adventure"]["start_time"]).split(":"))

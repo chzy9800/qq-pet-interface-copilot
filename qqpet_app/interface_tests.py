@@ -127,18 +127,82 @@ class InterfaceTestRunner:
             f"storyId={result.story_id or story.story_id or '未返回'}，服务器剩余 {story.remaining_seconds}s",
         )
 
-    def start_work(self, career_type: int, sub_event: int, label: str) -> InterfaceTestResult:
+    def start_work(
+        self,
+        career_type: int,
+        sub_event: int,
+        label: str,
+        hired_user_id: str = "",
+        hired_pet_id: str = "",
+        hired_name: str = "",
+    ) -> InterfaceTestResult:
         self._require_write(story_action=True)
         self._require_idle_story()
-        result = self.client.start_work(career_type, sub_event, "highest_total")
+        result = self.client.start_work(
+            career_type,
+            sub_event,
+            "highest_total",
+            hired_user_id,
+            hired_pet_id,
+        )
         story = self.client.query_story()
         succeeded = bool(result.story_id or story.story_id)
+        hire_detail = ""
+        if hired_user_id:
+            hire_target = hired_name or hired_user_id
+            friend_echoed = bool(
+                story.raw_body
+                and (
+                    hired_pet_id.encode("utf-8") in story.raw_body
+                    or hired_user_id.encode("utf-8") in story.raw_body
+                )
+            )
+            if friend_echoed:
+                hire_detail = f"，服务器任务状态已回显雇佣好友 {hire_target}"
+            elif result.hired_friend:
+                hire_detail = (
+                    f"，雇佣好友 {hire_target} 已写入开工封包；任务已开始，"
+                    "但状态接口未回显好友身份"
+                )
+            else:
+                hire_detail = f"，好友 {hire_target} 未写入开工结果"
         return InterfaceTestResult(
-            "打工开工",
+            "雇佣好友开工" if hired_user_id else "打工开工",
             label,
             succeeded,
-            f"storyId={result.story_id or story.story_id or '未返回'}，服务器剩余 {story.remaining_seconds}s",
+            f"storyId={result.story_id or story.story_id or '未返回'}，"
+            f"服务器剩余 {story.remaining_seconds}s{hire_detail}",
         )
+
+    def recall_employed(self) -> InterfaceTestResult:
+        self._require_write(story_action=True)
+        before = self.client.query_story()
+        if not before.story_id or not before.recallable:
+            raise QQPetError("当前没有可召回的被雇佣任务")
+        if not before.story_id.startswith("6500_"):
+            raise QQPetError(
+                f"当前任务 {before.story_id} 不是被雇佣任务，已阻止召回测试"
+            )
+        response = self.client.settle_story(before.story_id)
+        time.sleep(float(self.config["care"].get("verify_delay_seconds", 1)))
+        after = self.client.query_story()
+        succeeded = bool(
+            response.body
+            and (
+                not after.story_id
+                or after.story_id != before.story_id
+                or after.finished
+                or not after.recallable
+            )
+        )
+        detail = (
+            f"召回前 storyId={before.story_id}，进度 "
+            f"{before.elapsed_seconds}/{before.duration_seconds}s；"
+            f"召回后 storyId={after.story_id or '无'}，recallable={after.recallable}"
+        )
+        if not succeeded:
+            detail += "；服务器仍返回同一个可召回任务，未确认召回生效"
+        return InterfaceTestResult("被雇佣召回", before.story_id, succeeded, detail)
 
     def start_adventure(self, option_name: str, label: str) -> InterfaceTestResult:
         self._require_write(story_action=True)

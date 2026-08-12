@@ -1006,6 +1006,31 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(scheduler.run_once(), "work")
             self.assertEqual(fake.started, ("10002", "pet-two"))
 
+    def test_manual_work_hire_uses_configured_friend(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["work"]["employ_friend"] = True
+            config["work"]["hire_mode"] = "manual"
+            config["work"]["hire_friend_uin"] = "10001"
+            config["work"]["hire_friend_pet_id"] = "saved-pet"
+            config["work"]["hire_friend_name"] = "好友甲"
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+
+            class FakeClient:
+                def query_pk_friend_candidates(self):
+                    return (
+                        PKOpponent("10001", "live-pet", nickname="好友甲", power=10),
+                        PKOpponent("10002", "pet-two", nickname="好友乙", power=99),
+                    )
+
+            selected = scheduler._select_work_hire(FakeClient(), config)
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected.user_id, "10001")
+            self.assertEqual(selected.pet_id, "live-pet")
+
     def test_unavailable_saved_work_job_falls_back_before_start(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

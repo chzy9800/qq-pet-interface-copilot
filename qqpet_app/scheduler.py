@@ -327,15 +327,40 @@ class Scheduler:
         work = config["work"]
         if not work.get("employ_friend", False):
             return None
+        hire_mode = str(work.get("hire_mode", "auto"))
+        own_uin = str(config.get("account", {}).get("uin", "")).strip()
         try:
             candidates = tuple(
                 item
                 for item in client.query_pk_friend_candidates()
-                if item.user_id and item.pet_id
+                if item.user_id and item.pet_id and item.user_id != own_uin
             )
         except QQPetError as exc:
             candidates = ()
             self.log(f"打工雇佣好友池暂时无法更新：{exc}")
+
+        if hire_mode == "manual":
+            selected_uin = str(work.get("hire_friend_uin", "")).strip()
+            selected_pet_id = str(work.get("hire_friend_pet_id", "")).strip()
+            selected = next(
+                (item for item in candidates if item.user_id == selected_uin),
+                None,
+            )
+            if selected is not None:
+                self.log(
+                    f"打工将手动雇佣好友 "
+                    f"{selected.nickname or selected.pet_name or selected.user_id}"
+                )
+                return selected
+            if selected_uin and selected_pet_id:
+                self.log("手动雇佣好友本轮未出现在好友池，使用已保存的真实宠物 ID")
+                return PKOpponent(
+                    user_id=selected_uin,
+                    pet_id=selected_pet_id,
+                    nickname=str(work.get("hire_friend_name", "")).strip(),
+                )
+            self.log("已选择手动雇佣，但尚未保存有效好友；本次不雇佣")
+            return None
 
         if candidates:
             # Prefer the strongest known friend. The QQ number is a stable

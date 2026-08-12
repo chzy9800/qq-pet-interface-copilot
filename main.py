@@ -50,7 +50,8 @@ SETTING_FIELDS = [
     ("school.attribute", "学习属性 culture/physical/art", str),
     ("work.enabled", "启用打工", bool),
     ("work.times_per_day", "每日打工上限（0 不限）", int),
-    ("work.employ_friend", "启用打工雇佣好友（自动选择可用好友）", bool),
+    ("work.employ_friend", "启用打工雇佣好友", bool),
+    ("work.hire_mode", "雇佣方式", str),
     ("adventure.enabled", "启用冒险", bool),
     ("adventure.start_time", "冒险开始时间 HH:MM", str),
     ("adventure.times_per_day", "每日冒险上限", int),
@@ -121,6 +122,10 @@ SETTING_FIELDS = [
 ]
 
 CHOICE_FIELDS = {
+    "work.hire_mode": {
+        "自动选择可用好友": "auto",
+        "手动选择固定好友": "manual",
+    },
     "story.employed_recall_mode": {
         "等到 25/75（收益分成最高）": "best_split",
         "立刻召回": "immediate",
@@ -184,6 +189,8 @@ class MainWindow(tk.Tk):
         self.adventure_options: dict[str, str] = {
             "自动选择服务器当前可用冒险": ""
         }
+        self.work_hire_friend_var = tk.StringVar(value="请先刷新好友宠物池")
+        self.work_hire_friend_options: dict[str, PKOpponent] = {}
         self.test_food_var = tk.StringVar(value="默认饼干（已验证）")
         self.test_food_options: dict[str, tuple[str, str]] = {
             "默认饼干（已验证）": ("", "默认饼干")
@@ -195,6 +202,7 @@ class MainWindow(tk.Tk):
         }
         self.test_course_var = tk.StringVar(value="请先刷新接口目录")
         self.test_job_var = tk.StringVar(value="请先刷新接口目录")
+        self.test_hire_friend_var = tk.StringVar(value="请先刷新好友宠物池")
         self.test_adventure_var = tk.StringVar(value="请先刷新接口目录")
         self.interface_test_status_var = tk.StringVar(
             value="进入本页后会自动读取目录；也可点击刷新按钮重新读取。"
@@ -647,6 +655,26 @@ class MainWindow(tk.Tk):
         self.job_status_label.grid(
             row=job_row + 1, column=1, sticky="w", padx=6, pady=(0, 5)
         )
+        ttk.Label(work_section, text="手动雇佣好友").grid(
+            row=job_row + 2, column=0, sticky="w", padx=6, pady=5
+        )
+        hire_box = ttk.Frame(work_section)
+        hire_box.grid(row=job_row + 2, column=1, sticky="ew", padx=6, pady=5)
+        self.work_hire_friend_combo = ttk.Combobox(
+            hire_box,
+            textvariable=self.work_hire_friend_var,
+            state="readonly",
+            width=41,
+        )
+        self.work_hire_friend_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(
+            hire_box, text="刷新好友", command=self._refresh_manual_pk_friends
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(
+            work_section,
+            text="选择“手动选择固定好友”时生效；仅显示服务器已确认拥有宠物的好友。",
+            foreground="#666",
+        ).grid(row=job_row + 3, column=1, sticky="w", padx=6, pady=(0, 5))
         adventure_section = section_frames["adventure"]
         adventure_row = section_rows["adventure"]
         ttk.Label(adventure_section, text="服务器冒险选项").grid(
@@ -755,17 +783,45 @@ class MainWindow(tk.Tk):
         self.test_adventure_combo.grid(row=7, column=1, sticky="ew", padx=6, pady=5)
         add_button(7, "真实测试：立即冒险", lambda: self._run_interface_test("adventure"))
 
-        ttk.Separator(section).grid(
-            row=8, column=0, columnspan=3, sticky="ew", padx=6, pady=(12, 8)
+        ttk.Label(section, text="雇佣好友开工").grid(
+            row=8, column=0, sticky="w", padx=6, pady=5
         )
-        ttk.Label(section, text="最近结果").grid(row=9, column=0, sticky="nw", padx=6, pady=5)
+        self.test_hire_friend_combo = ttk.Combobox(
+            section,
+            textvariable=self.test_hire_friend_var,
+            state="readonly",
+            width=45,
+        )
+        self.test_hire_friend_combo.grid(row=8, column=1, sticky="ew", padx=6, pady=5)
+        add_button(
+            8,
+            "真实测试：雇佣好友开工",
+            lambda: self._run_interface_test("work_hire"),
+        )
+
+        ttk.Label(section, text="被他人雇佣召回").grid(
+            row=9, column=0, sticky="w", padx=6, pady=5
+        )
+        ttk.Label(section, text="读取当前被雇佣任务并立即召回验证").grid(
+            row=9, column=1, sticky="w", padx=6, pady=5
+        )
+        add_button(
+            9,
+            "真实测试：立即召回",
+            lambda: self._run_interface_test("recall_employed"),
+        )
+
+        ttk.Separator(section).grid(
+            row=10, column=0, columnspan=3, sticky="ew", padx=6, pady=(12, 8)
+        )
+        ttk.Label(section, text="最近结果").grid(row=11, column=0, sticky="nw", padx=6, pady=5)
         ttk.Label(
             section,
             textvariable=self.interface_test_status_var,
             wraplength=700,
             justify=tk.LEFT,
             foreground="#5d5568",
-        ).grid(row=9, column=1, columnspan=2, sticky="w", padx=6, pady=5)
+        ).grid(row=11, column=1, columnspan=2, sticky="w", padx=6, pady=5)
         section.columnconfigure(1, weight=1)
 
     def _metric_card(
@@ -1382,12 +1438,19 @@ class MainWindow(tk.Tk):
                 if not sub_event:
                     raise ValueError("请先刷新目录并选择一门具体课程")
                 selections.update(label=label, sub_event=sub_event)
-            elif action == "work":
+            elif action in {"work", "work_hire"}:
                 label = self.test_job_var.get()
                 career_type, sub_event = self.job_options.get(label, (0, 0))
                 if not career_type or not sub_event:
                     raise ValueError("请先刷新目录并选择一个具体岗位")
                 selections.update(label=label, career_type=career_type, sub_event=sub_event)
+                if action == "work_hire":
+                    friend = self.work_hire_friend_options.get(
+                        self.test_hire_friend_var.get()
+                    )
+                    if friend is None or not friend.user_id or not friend.pet_id:
+                        raise ValueError("请先刷新好友宠物池并选择一位可雇佣好友")
+                    selections["hired_friend"] = friend
             elif action == "adventure":
                 label = self.test_adventure_var.get()
                 option_name = self.adventure_options.get(label, "")
@@ -1405,7 +1468,9 @@ class MainWindow(tk.Tk):
             "wash": "洗澡",
             "school": "学习开课",
             "work": "打工开工",
+            "work_hire": "雇佣好友开工",
             "adventure": "冒险启动",
+            "recall_employed": "被雇佣召回",
         }[action]
         self.interface_test_status_var.set(f"正在执行：{action_name}…")
         self._append_log(f"[{datetime.now():%H:%M:%S}] 接口单项测试开始：{action_name}")
@@ -1426,10 +1491,22 @@ class MainWindow(tk.Tk):
                     result = runner.start_work(
                         selections["career_type"], selections["sub_event"], selections["label"]
                     )
-                else:
+                elif action == "work_hire":
+                    friend = selections["hired_friend"]
+                    result = runner.start_work(
+                        selections["career_type"],
+                        selections["sub_event"],
+                        selections["label"],
+                        friend.user_id,
+                        friend.pet_id,
+                        friend.nickname or friend.pet_name,
+                    )
+                elif action == "adventure":
                     result = runner.start_adventure(
                         selections["option_name"], selections["label"]
                     )
+                else:
+                    result = runner.recall_employed()
                 self.events.put(("interface_test_done", result))
             except Exception as exc:
                 self.events.put(("interface_test_error", (action_name, str(exc))))
@@ -1492,6 +1569,22 @@ class MainWindow(tk.Tk):
             config["work"]["career_type"] = career_type
             config["work"]["job_sub_event"] = job_sub_event
             config["work"]["strategy"] = "highest_total"
+            hire_mode = str(config["work"].get("hire_mode", "auto"))
+            if config["work"].get("employ_friend") and hire_mode == "manual":
+                selected_hire = self.work_hire_friend_options.get(
+                    self.work_hire_friend_var.get()
+                )
+                if selected_hire is None:
+                    raise ValueError("手动雇佣模式下，请刷新并选择一位有宠物的好友")
+                config["work"]["hire_friend_uin"] = selected_hire.user_id
+                config["work"]["hire_friend_pet_id"] = selected_hire.pet_id
+                config["work"]["hire_friend_name"] = (
+                    selected_hire.nickname or selected_hire.pet_name
+                )
+            elif hire_mode == "auto":
+                config["work"]["hire_friend_uin"] = ""
+                config["work"]["hire_friend_pet_id"] = ""
+                config["work"]["hire_friend_name"] = ""
             selected_adventure = self.adventure_var.get()
             if selected_adventure not in self.adventure_options:
                 raise ValueError("请刷新并重新选择冒险")
@@ -1613,6 +1706,10 @@ class MainWindow(tk.Tk):
         previous_care_uin = self.friend_care_friend_uins.get(
             self.friend_care_friend_var.get(), ""
         )
+        previous_hire_uin = ""
+        previous_hire = self.work_hire_friend_options.get(self.work_hire_friend_var.get())
+        if previous_hire:
+            previous_hire_uin = previous_hire.user_id
         configured_uin = str(self.config_store.data["pk"].get("opponent_uin", ""))
         rows = self._friend_choice_rows(
             self.manual_pk_all_friends,
@@ -1633,6 +1730,47 @@ class MainWindow(tk.Tk):
         self.friend_care_friend_uins = dict(uins)
         self.manual_pk_friend_combo.configure(values=tuple(options))
         self.friend_care_friend_combo.configure(values=tuple(options))
+
+        hire_rows: list[tuple[str, PKOpponent]] = []
+        own_uin = str(self.config_store.data["account"].get("uin", "")).strip()
+        friend_names = {
+            friend.user_id: friend.remark or friend.nickname
+            for friend in self.manual_pk_all_friends
+        }
+        for opponent in self.manual_pk_cached_opponents.values():
+            if (
+                not opponent.user_id
+                or not opponent.pet_id
+                or opponent.user_id == own_uin
+            ):
+                continue
+            display = (
+                friend_names.get(opponent.user_id)
+                or opponent.nickname
+                or opponent.pet_name
+                or opponent.user_id
+            )
+            label = f"{display}｜QQ {opponent.user_id}｜petId 已确认"
+            hire_rows.append((label, opponent))
+        hire_rows.sort(key=lambda item: ((item[1].nickname or item[0]).casefold(), item[1].user_id))
+        self.work_hire_friend_options = dict(hire_rows)
+        hire_labels = tuple(label for label, _item in hire_rows)
+        self.work_hire_friend_combo.configure(values=hire_labels)
+        self.test_hire_friend_combo.configure(values=hire_labels)
+        configured_hire_uin = str(
+            self.config_store.data["work"].get("hire_friend_uin", "")
+        ).strip()
+        selected_hire_uin = previous_hire_uin or configured_hire_uin
+        selected_hire = next(
+            (
+                label
+                for label, opponent in hire_rows
+                if opponent.user_id == selected_hire_uin
+            ),
+            next(iter(hire_labels), "当前没有可雇佣的宠物好友"),
+        )
+        self.work_hire_friend_var.set(selected_hire)
+        self.test_hire_friend_var.set(selected_hire)
 
         manual_uin = previous_manual_uin or configured_uin
         selected = next(
