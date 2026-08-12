@@ -11,6 +11,8 @@ from qqpet_app.client import (
     PKPower,
     PKResult,
     PetValues,
+    QQPetConnectionError,
+    QQPetEmptyResponse,
     QQPetError,
     QQFriend,
     SchoolCourse,
@@ -35,6 +37,88 @@ def oidb_response(command: int, sub: int, body: bytes) -> dict:
 
 
 class ProtoAndClientTests(unittest.TestCase):
+    def test_http_packet_transport_explicitly_waits_for_response(self) -> None:
+        client = NapCatClient("http://unused", "token", "pet")
+        calls = []
+
+        def action(name: str, params=None):
+            calls.append((name, params))
+            return {"status": "ok", "retcode": 0, "data": "00"}
+
+        client._onebot_action = action  # type: ignore[method-assign]
+        client._http_transport("OidbSvcTrpcTcp.0x96f2_1", "abcd")
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "send_packet",
+                    {
+                        "cmd": "OidbSvcTrpcTcp.0x96f2_1",
+                        "data": "abcd",
+                        "rsp": True,
+                    },
+                )
+            ],
+        )
+
+    def test_oidb_server_error_includes_returned_detail(self) -> None:
+        raw = (
+            field_varint(1, 38642)
+            + field_varint(2, 1)
+            + field_varint(3, 319)
+            + field_bytes(4, b"")
+            + field_string(5, "[oidb] rule type not match appid")
+        )
+        client = NapCatClient(
+            "http://unused",
+            "token",
+            "pet",
+            transport=lambda *_: {"status": "ok", "retcode": 0, "data": raw.hex()},
+        )
+        with self.assertRaisesRegex(
+            QQPetError, "errorCode=319.*rule type not match appid"
+        ):
+            client.send_oidb("OidbSvcTrpcTcp.0x96f2_1", 38642, 1, b"")
+
+    def test_read_only_oidb_retries_empty_response_without_retrying_forever(self) -> None:
+        calls = 0
+
+        def transport(_command: str, _data: str) -> dict:
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                return {"status": "ok", "retcode": 0, "data": ""}
+            return oidb_response(39241, 1, field_varint(1, 12))
+
+        client = NapCatClient("http://unused", "token", "pet", transport=transport)
+        response = client.send_oidb_read(
+            "OidbSvcTrpcTcp.0x9949_1", 39241, 1, b"", delay_seconds=0
+        )
+        self.assertEqual(calls, 3)
+        self.assertEqual(first_varint(parse_message(response.body), 1), 12)
+
+    def test_write_oidb_empty_response_is_not_retried_implicitly(self) -> None:
+        calls = 0
+
+        def transport(_command: str, _data: str) -> dict:
+            nonlocal calls
+            calls += 1
+            return {"status": "ok", "retcode": 0, "data": ""}
+
+        client = NapCatClient("http://unused", "token", "pet", transport=transport)
+        with self.assertRaises(QQPetEmptyResponse):
+            client.send_oidb("OidbSvcTrpcTcp.0x975e_1", 38750, 1, b"")
+        self.assertEqual(calls, 1)
+
+    def test_oidb_connection_error_keeps_command_for_safe_write_recovery(self) -> None:
+        def transport(_command: str, _data: str) -> dict:
+            raise QQPetConnectionError("timed out")
+
+        client = NapCatClient("http://unused", "token", "pet", transport=transport)
+        with self.assertRaises(QQPetConnectionError) as raised:
+            client.send_oidb("OidbSvcTrpcTcp.0x975e_1", 38750, 1, b"")
+        self.assertEqual(raised.exception.command_name, "OidbSvcTrpcTcp.0x975e_1")
+
     def test_resolve_pk_opponent_merges_qq_remark_pet_id_and_live_power(self) -> None:
         client = NapCatClient("http://unused", "token", "self-pet")
         client.query_pk_friend_candidates = lambda: (
@@ -315,6 +399,111 @@ class ProtoAndClientTests(unittest.TestCase):
         self.assertAlmostEqual(values.total, 91.9, places=2)
         self.assertEqual(values.gold, 1578.75)
 
+    def test_mobile_values_reader_is_preferred_without_sending_desktop_packet(self) -> None:
+        expected = PetValues(98, 100, 99, 99.2, 2147)
+        desktop_calls = 0
+
+        def transport(_command: str, _data: str) -> dict:
+            nonlocal desktop_calls
+            desktop_calls += 1
+            return {"status": "ok", "retcode": 0, "data": ""}
+
+        client = NapCatClient(
+            "http://unused",
+            "token",
+            "pet",
+            transport=transport,
+            values_reader=lambda pet_id: expected if pet_id == "pet" else PetValues(),
+        )
+        self.assertEqual(client.query_values(), expected)
+        self.assertEqual(desktop_calls, 0)
+
+    def test_mobile_values_failure_never_falls_back_to_desktop(self) -> None:
+        def mobile_values(_pet_id: str) -> PetValues:
+            raise QQPetConnectionError("手机协议不可用")
+
+        client = NapCatClient(
+            "http://unused",
+            "token",
+            "pet",
+            transport=lambda *_: self.fail("desktop transport should not run"),
+            values_reader=mobile_values,
+        )
+        with self.assertRaisesRegex(QQPetConnectionError, "手机协议不可用"):
+            client.query_values()
+
+    def test_mobile_oidb_read_transport_is_used_for_food_inventory(self) -> None:
+        calls = []
+
+        def mobile_read(command_name: str, command: int, sub: int, body: bytes) -> bytes:
+            calls.append((command_name, command, sub, body))
+            shrimp = field_varint(1, 7)
+            state = field_bytes(3, shrimp)
+            return field_varint(1, 3) + field_varint(2, 999) + field_bytes(3, state)
+
+        client = NapCatClient(
+            "http://unused",
+            "token",
+            "pet",
+            transport=lambda *_: self.fail("desktop transport should not run"),
+            oidb_read_transport=mobile_read,
+        )
+        self.assertEqual(client.query_food_inventory().biscuits, 3)
+        self.assertEqual(client.query_food_inventory().shrimp, 7)
+        self.assertEqual(calls[0][:3], ("OidbSvcTrpcTcp.0x9949_1", 39241, 1))
+
+    def test_mobile_oidb_read_failure_never_falls_back_to_desktop(self) -> None:
+        def mobile_read(_command_name: str, _command: int, _sub: int, _body: bytes) -> bytes:
+            raise QQPetConnectionError("手机读取失败")
+
+        client = NapCatClient(
+            "http://unused",
+            "token",
+            "pet",
+            transport=lambda *_: self.fail("desktop transport should not run"),
+            oidb_read_transport=mobile_read,
+        )
+        with self.assertRaisesRegex(QQPetConnectionError, "手机读取失败"):
+            client.query_food_inventory()
+
+    def test_mobile_feed_write_never_uses_desktop_transport(self) -> None:
+        calls = []
+
+        def mobile_write(command_name: str, command: int, sub: int, body: bytes) -> bytes:
+            calls.append((command_name, command, sub, body))
+            return b""
+
+        client = NapCatClient(
+            "http://unused",
+            "token",
+            "pet",
+            transport=lambda *_: self.fail("desktop transport should not run"),
+            oidb_write_transport=mobile_write,
+        )
+        client.feed()
+        self.assertEqual(calls[0][:3], ("OidbSvcTrpcTcp.0x992d_1", 39213, 1))
+
+    def test_mobile_school_start_transport_returns_real_story_id(self) -> None:
+        calls = []
+
+        def mobile_write(command_name: str, command: int, sub: int, body: bytes) -> bytes:
+            calls.append((command_name, command, sub, parse_message(body)))
+            return field_string(1, "6100_mobile_story")
+
+        client = NapCatClient(
+            "http://unused",
+            "token",
+            "pet",
+            oidb_write_transport=mobile_write,
+        )
+        client.select_school_course = lambda *_: SchoolCourse(
+            "奇想夏令营", 6124007, reward="随机属性+5", can_do=True
+        )
+        result = client.start_school("physical", 6124007)
+        self.assertEqual(result.story_id, "6100_mobile_story")
+        self.assertEqual(calls[0][:3], ("OidbSvcTrpcTcp.0x975e_1", 38750, 1))
+        self.assertEqual(first_varint(calls[0][3], 7), 6124007)
+
     def test_story_completion_uses_progress_not_unix_time(self) -> None:
         running = StoryStatus("6400_x", 51, remaining_seconds=5739, duration_seconds=14400, started_at=1785600267)
         done = StoryStatus("6400_x", 51, remaining_seconds=0, duration_seconds=14400, started_at=1785600267)
@@ -568,7 +757,15 @@ class ProtoAndClientTests(unittest.TestCase):
         def transport(_command: str, data: str) -> dict:
             request = parse_message(bytes.fromhex(data))
             self.assertEqual(first_bytes(request, 4), b"")
-            return oidb_response(39241, 1, field_varint(1, 12) + field_varint(2, 10))
+            shrimp = field_varint(1, 10)
+            state = field_varint(1, 12) + field_varint(2, 999) + field_bytes(3, shrimp)
+            return oidb_response(
+                39241,
+                1,
+                field_varint(1, 12)
+                + field_varint(2, 999)
+                + field_bytes(3, state),
+            )
 
         client = NapCatClient("http://unused", "token", "pet", transport=transport)
         inventory = client.query_food_inventory()

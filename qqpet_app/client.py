@@ -27,6 +27,22 @@ class QQPetError(RuntimeError):
     pass
 
 
+class QQPetConnectionError(QQPetError):
+    """NapCat HTTP endpoint or logged-in session is unavailable."""
+
+    def __init__(self, message: str, command_name: str = "") -> None:
+        self.command_name = command_name
+        super().__init__(message)
+
+
+class QQPetEmptyResponse(QQPetError):
+    """NapCat accepted an OIDB request but returned no response packet."""
+
+    def __init__(self, command_name: str) -> None:
+        self.command_name = command_name
+        super().__init__(f"{command_name} 返回空响应")
+
+
 @dataclass(frozen=True)
 class OidbResponse:
     command: int
@@ -75,9 +91,9 @@ class PKOpponent:
 class FoodInventory:
     """Food counts returned by PetFeed_GetFeedTimesInfo.
 
-    Android QQ 9.3.25's food exchange sheet confirms field 1 is biscuits and
-    field 2 is shrimp.  Older code incorrectly labelled these as a remaining
-    allowance and a recovery value.
+    Android QQ 9.3.35 confirms root field 1 is biscuits.  Shrimp is nested in
+    root field 3 -> field 3 -> field 1; root field 2 is an allowance/limit.
+    A root-field-2 fallback is retained for older compact responses.
     """
 
     biscuits: int = 0
@@ -322,6 +338,11 @@ class PageRules:
 
 
 Transport = Callable[[str, str], dict]
+ValuesReader = Callable[[str], PetValues]
+OidbReadTransport = Callable[[str, int, int, bytes], bytes]
+OidbWriteTransport = Callable[[str, int, int, bytes], bytes]
+LoginUinReader = Callable[[], str]
+FriendListReader = Callable[[], tuple[QQFriend, ...]]
 
 
 class NapCatClient:
@@ -375,15 +396,31 @@ class NapCatClient:
         pet_id: str,
         timeout: float = 15.0,
         transport: Transport | None = None,
+        values_reader: ValuesReader | None = None,
+        oidb_read_transport: OidbReadTransport | None = None,
+        oidb_write_transport: OidbWriteTransport | None = None,
+        login_uin_reader: LoginUinReader | None = None,
+        friend_list_reader: FriendListReader | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.pet_id = pet_id
         self.timeout = timeout
         self._transport = transport
+        self._values_reader = values_reader
+        self._oidb_read_transport = oidb_read_transport
+        self._oidb_write_transport = oidb_write_transport
+        self._login_uin_reader = login_uin_reader
+        self._friend_list_reader = friend_list_reader
+        self.last_values_source = "desktop"
 
     def _http_transport(self, command: str, data_hex: str) -> dict:
-        return self._onebot_action("send_packet", {"cmd": command, "data": data_hex})
+        # NapCat 4.18.x does not reliably materialize the schema's default for
+        # `rsp`.  When it is omitted, SendPacket treats it as false and returns
+        # status=ok with an empty payload without waiting for the server reply.
+        return self._onebot_action(
+            "send_packet", {"cmd": command, "data": data_hex, "rsp": True}
+        )
 
     def _onebot_action(self, action: str, params: dict | None = None) -> dict:
         body = json.dumps(params or {}).encode("utf-8")
@@ -400,9 +437,11 @@ class NapCatClient:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise QQPetError(f"无法连接本机 NapCat：{exc}") from exc
+            raise QQPetConnectionError(f"无法连接本机 NapCat：{exc}") from exc
 
     def query_friend_list(self) -> tuple[QQFriend, ...]:
+        if self._friend_list_reader is not None:
+            return self._friend_list_reader()
         result = self._onebot_action("get_friend_list")
         if result.get("retcode") != 0 or result.get("status") != "ok":
             raise QQPetError(f"NapCat 好友列表请求失败：{result}")
@@ -423,18 +462,20 @@ class NapCatClient:
 
     def check_connection(self) -> str:
         """Verify that NapCat is reachable and has a logged-in QQ session."""
+        if self._login_uin_reader is not None:
+            return self._login_uin_reader()
         result = self._onebot_action("get_login_info")
         if result.get("retcode") != 0 or result.get("status") != "ok":
-            raise QQPetError(f"NapCat 登录会话尚未就绪：{result}")
+            raise QQPetConnectionError(f"NapCat 登录会话尚未就绪：{result}")
         data = result.get("data") or {}
         uin = str(data.get("user_id") or "")
         if not uin.isdigit():
-            raise QQPetError("NapCat 已连接，但尚未取得有效 QQ 登录会话")
+            raise QQPetConnectionError("NapCat 已连接，但尚未取得有效 QQ 登录会话")
         return uin
 
     def query_own_pet_profile(self, expected_uin: str = "") -> OwnPetProfile:
         """Read the logged-in account's pet identity without a pre-known petId."""
-        response = self.send_oidb(*self.OWN_PROFILE, b"").body
+        response = self.send_oidb_read(*self.OWN_PROFILE, b"").body
         profile_raw = first_bytes(parse_message(response), 1)
         if not profile_raw:
             raise QQPetError("服务器未返回本人宠物资料，账号可能尚未开通 QQ 宠物")
@@ -473,7 +514,7 @@ class NapCatClient:
             body = field_varint(2, int(source))
             if cursor:
                 body = field_string(1, cursor) + body
-            response = self.send_oidb(*self.PK_FRIEND_LIST, body).body
+            response = self.send_oidb_read(*self.PK_FRIEND_LIST, body).body
             root = parse_message(response)
             for value in root.get(1, []):
                 if value.wire_type != 2:
@@ -554,13 +595,23 @@ class NapCatClient:
         )
 
     def send_oidb(self, command_name: str, command: int, sub_command: int, body: bytes) -> OidbResponse:
+        if self._oidb_write_transport is not None:
+            response_body = self._oidb_write_transport(
+                command_name, command, sub_command, body
+            )
+            return OidbResponse(
+                command, sub_command, 0, response_body, response_body
+            )
         request = oidb_request(command, sub_command, body)
-        result = (self._transport or self._http_transport)(command_name, request.hex())
+        try:
+            result = (self._transport or self._http_transport)(command_name, request.hex())
+        except QQPetConnectionError as exc:
+            raise QQPetConnectionError(str(exc), command_name) from exc
         if result.get("retcode") != 0 or result.get("status") != "ok":
             raise QQPetError(f"NapCat 请求失败：{result}")
         data_hex = result.get("data") or ""
         if not data_hex:
-            raise QQPetError(f"{command_name} 返回空响应")
+            raise QQPetEmptyResponse(command_name)
         try:
             raw = bytes.fromhex(data_hex)
             outer = parse_message(raw)
@@ -569,20 +620,65 @@ class NapCatClient:
         error_code = first_varint(outer, 3)
         response_body = first_bytes(outer, 4)
         if error_code != 0:
-            raise QQPetError(f"{command_name} OIDB errorCode={error_code}")
+            detail = first_string(outer, 5).strip()
+            suffix = f"：{detail}" if detail else ""
+            raise QQPetError(
+                f"{command_name} OIDB errorCode={error_code}{suffix}"
+            )
         return OidbResponse(command, sub_command, error_code, response_body, raw)
 
+    def send_oidb_read(
+        self,
+        command_name: str,
+        command: int,
+        sub_command: int,
+        body: bytes,
+        attempts: int = 3,
+        delay_seconds: float = 0.35,
+    ) -> OidbResponse:
+        """Retry a read-only OIDB request when the desktop bridge yields an empty packet.
+
+        This helper must not be used for state-changing requests: an empty
+        response does not prove that the server rejected a write.
+        """
+        if self._oidb_read_transport is not None:
+            mobile_body = self._oidb_read_transport(
+                command_name, command, sub_command, body
+            )
+            return OidbResponse(
+                command, sub_command, 0, mobile_body, mobile_body
+            )
+        last_error: QQPetEmptyResponse | None = None
+        for attempt in range(max(1, int(attempts))):
+            try:
+                return self.send_oidb(command_name, command, sub_command, body)
+            except QQPetEmptyResponse as exc:
+                last_error = exc
+                if attempt + 1 < max(1, int(attempts)):
+                    time.sleep(max(0.0, float(delay_seconds)))
+        assert last_error is not None
+        raise last_error
+
     def query_values(self) -> PetValues:
+        if self._values_reader is not None:
+            values = self._values_reader(self.pet_id)
+            self.last_values_source = "mobile"
+            return values
+        values = self._query_values_desktop()
+        self.last_values_source = "desktop"
+        return values
+
+    def _query_values_desktop(self) -> PetValues:
         # 类型 1~5 均返回完整四项状态；类型 6 单独返回金币。
         common_request = field_string(1, self.pet_id) + field_bytes(2, b"\x01")
-        common = self.send_oidb(*self.DISPLAY, common_request).body
+        common = self.send_oidb_read(*self.DISPLAY, common_request).body
         common_root = parse_message(first_bytes(parse_message(common), 1))
 
         def current(field: int) -> float:
             return first_float(parse_message(first_bytes(common_root, field)), 3)
 
         gold_request = field_string(1, self.pet_id) + field_bytes(2, b"\x06")
-        gold = self.send_oidb(*self.DISPLAY, gold_request).body
+        gold = self.send_oidb_read(*self.DISPLAY, gold_request).body
         gold_root = parse_message(first_bytes(parse_message(gold), 1))
         gold_value = first_float(parse_message(first_bytes(gold_root, 5)), 3)
         return PetValues(current(1), current(2), current(3), current(4), gold_value)
@@ -591,12 +687,22 @@ class NapCatClient:
         return self.send_oidb(*self.FEED, field_string(4, self.pet_id))
 
     def query_food_inventory(self) -> FoodInventory:
-        # 手机 QQ 9.3.25 的“兑换食物/背包”页已实测：字段 1=饼干，字段 2=虾仁。
-        response = self.send_oidb(*self.FEED_TIMES, b"").body
+        # 手机 QQ 9.3.35 的真实响应中：根字段 1=饼干；根字段 2 是
+        # 上限/额度（当前实测为 999），不是虾仁。虾仁数量位于字段 3
+        # 状态消息的字段 3 子消息中。旧版精简响应才把虾仁放在根字段 2。
+        response = self.send_oidb_read(*self.FEED_TIMES, b"").body
         root = parse_message(response)
+        state_raw = first_bytes(root, 3)
+        state = parse_message(state_raw) if state_raw else {}
+        shrimp_raw = first_bytes(state, 3)
+        shrimp = (
+            first_varint(parse_message(shrimp_raw), 1)
+            if shrimp_raw
+            else first_varint(root, 2)
+        )
         return FoodInventory(
             biscuits=first_varint(root, 1),
-            shrimp=first_varint(root, 2),
+            shrimp=shrimp,
         )
 
     def query_feed_allowance(self) -> FoodInventory:
@@ -618,7 +724,7 @@ class NapCatClient:
 
     def query_bath_items(self) -> tuple[BathItem, ...]:
         # itemType=1 requests the complete wash-item shop configuration.
-        response = self.send_oidb(*self.BATH_ITEM_CONFIG, field_varint(1, 1)).body
+        response = self.send_oidb_read(*self.BATH_ITEM_CONFIG, field_varint(1, 1)).body
         root = parse_message(response)
         items: list[BathItem] = []
         for value in root.get(1, []):
@@ -642,7 +748,7 @@ class NapCatClient:
         return tuple(items)
 
     def query_bath_inventory(self) -> BathInventory:
-        response = self.send_oidb(*self.BATH_INVENTORY, field_varint(1, 1)).body
+        response = self.send_oidb_read(*self.BATH_INVENTORY, field_varint(1, 1)).body
         root = parse_message(response)
         info_raw = first_bytes(root, 1)
         info = parse_message(info_raw) if info_raw else {}
@@ -728,7 +834,7 @@ class NapCatClient:
             body += field_varint(10, request_from)
         if platform is not None:
             body += field_varint(99, platform)
-        response = self.send_oidb(*self.PAGE_RULES, body).body
+        response = self.send_oidb_read(*self.PAGE_RULES, body).body
         root = parse_message(response)
         trace = first_string(root, 1)
         declared_count: int | None = None
@@ -817,7 +923,7 @@ class NapCatClient:
             + field_string(2, self.pet_id)
             + field_varint(100, 2)
         )
-        root = parse_message(self.send_oidb(*self.SCHOOL_OVERVIEW, body).body)
+        root = parse_message(self.send_oidb_read(*self.SCHOOL_OVERVIEW, body).body)
         stage = first_varint(root, 4)
         if stage not in {0, 1, 2, 3, 4}:
             raise QQPetError(f"服务器返回未知学习阶段：{stage}")
@@ -832,7 +938,7 @@ class NapCatClient:
             + field_varint(11, stage)
             + field_varint(100, 2)
         )
-        root = parse_message(self.send_oidb(*self.SCHOOL_COURSES, body).body)
+        root = parse_message(self.send_oidb_read(*self.SCHOOL_COURSES, body).body)
         courses: list[SchoolCourse] = []
         for value in root.get(1, []):
             if value.wire_type != 2:
@@ -906,7 +1012,7 @@ class NapCatClient:
             + field_string(2, self.pet_id)
             + field_varint(100, 2)
         )
-        root = parse_message(self.send_oidb(*self.WORK_OVERVIEW, body).body)
+        root = parse_message(self.send_oidb_read(*self.WORK_OVERVIEW, body).body)
         careers: list[WorkCareer] = []
         for value in root.get(1, []):
             if value.wire_type != 2:
@@ -945,7 +1051,7 @@ class NapCatClient:
             + field_varint(10, career_type)
             + field_varint(100, 2)
         )
-        root = parse_message(self.send_oidb(*self.WORK_JOBS, body).body)
+        root = parse_message(self.send_oidb_read(*self.WORK_JOBS, body).body)
         career_name = first_string(root, 2)
         jobs: list[WorkJob] = []
         for value in root.get(1, []):
@@ -1069,7 +1175,7 @@ class NapCatClient:
             + field_string(3, hired_pet_id)
             + field_varint(100, 2)
         )
-        root = parse_message(self.send_oidb(*self.ADVENTURE_OPTIONS, body).body)
+        root = parse_message(self.send_oidb_read(*self.ADVENTURE_OPTIONS, body).body)
         options: list[AdventureOption] = []
         for value in root.get(1, []):
             if value.wire_type != 2:
@@ -1142,7 +1248,7 @@ class NapCatClient:
     def query_pk_power(self, pet_id: str = "") -> PKPower:
         target_pet_id = pet_id or self.pet_id
         body = field_string(1, target_pet_id) + field_varint(100, 2)
-        response = self.send_oidb(*self.PK_POWER, body).body
+        response = self.send_oidb_read(*self.PK_POWER, body).body
         root = parse_message(response)
         info_raw = first_bytes(root, 1)
         info = parse_message(info_raw) if info_raw else {}
@@ -1191,7 +1297,7 @@ class NapCatClient:
 
     def query_pk_status(self, story_id: str) -> OidbResponse:
         body = field_string(1, story_id) + field_string(2, self.pet_id)
-        return self.send_oidb(*self.PK_STATUS, body)
+        return self.send_oidb_read(*self.PK_STATUS, body)
 
     def settle_pk(self, story_id: str) -> OidbResponse:
         # PK settlement differs from long-running outdoor stories: field 2 is
@@ -1258,7 +1364,7 @@ class NapCatClient:
         # Without field 100 the server can keep returning a stale completed
         # story even after DoAfterStoryInfo has already produced its result.
         request = field_string(1, self.pet_id) + field_varint(100, 2)
-        response = self.send_oidb(*self.STORY_STATUS, request).body
+        response = self.send_oidb_read(*self.STORY_STATUS, request).body
         root = parse_message(response)
         detail_raw = first_bytes(root, 1)
         detail = parse_message(detail_raw) if detail_raw else {}

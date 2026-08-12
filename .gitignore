@@ -36,6 +36,9 @@ docs/pc-napcat-probe.md
 
 # Local reverse-engineering and scratch material
 hooks/
+!hooks/
+hooks/*
+!hooks/qqpet_mobile_read_agent.js
 output/
 tmp/
 scripts/

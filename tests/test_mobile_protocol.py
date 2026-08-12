@@ -1,0 +1,48 @@
+from __future__ import annotations
+
+import unittest
+
+from qqpet_app.mobile_protocol import (
+    MobileProtocolReader,
+    frida_architecture,
+    select_adb_serial,
+)
+from qqpet_app.proto import field_bytes, field_fixed32
+
+
+class MobileProtocolTests(unittest.TestCase):
+    def test_select_adb_serial_prefers_configured_online_device(self) -> None:
+        output = "List of devices attached\n127.0.0.1:16384\tdevice\nemulator-5554\tdevice\n"
+        self.assertEqual(select_adb_serial(output, "emulator-5554"), "emulator-5554")
+
+    def test_select_adb_serial_falls_back_to_running_mumu_instance(self) -> None:
+        output = "List of devices attached\n127.0.0.1:16416\toffline\n127.0.0.1:16384\tdevice\n"
+        self.assertEqual(select_adb_serial(output, "127.0.0.1:16416"), "127.0.0.1:16384")
+
+    def test_frida_architecture_uses_kernel_architecture(self) -> None:
+        self.assertEqual(frida_architecture("aarch64\n"), "arm64")
+        self.assertEqual(frida_architecture("x86_64"), "x86_64")
+
+    def test_mobile_state_and_gold_packets_are_decoded(self) -> None:
+        display = b"".join(
+            field_bytes(index, field_fixed32(3, value))
+            for index, value in enumerate((98.0, 100.0, 97.0, 98.8), start=1)
+        )
+        personal = field_bytes(4, display)
+        state = field_bytes(1, field_bytes(5, personal))
+        gold = field_bytes(1, field_bytes(5, field_fixed32(3, 2147.0)))
+
+        reader = MobileProtocolReader(".")
+        replies = iter((state, gold))
+        reader._send_read = lambda _spec, _body: next(replies)  # type: ignore[method-assign]
+
+        values = reader.query_values("pet-id")
+        self.assertEqual(values.feel, 98.0)
+        self.assertEqual(values.hunger, 100.0)
+        self.assertEqual(values.clean, 97.0)
+        self.assertAlmostEqual(values.total, 98.8, places=2)
+        self.assertEqual(values.gold, 2147.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -7,12 +7,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from .client import NapCatClient, PetValues, PKOpponent, QQPetError, StoryStatus
+from .client import (
+    NapCatClient,
+    PetValues,
+    PKOpponent,
+    QQPetConnectionError,
+    QQPetEmptyResponse,
+    QQPetError,
+    StoryStatus,
+)
 from .config import ConfigStore
 from .friend_visits import FriendVisitProgress, eligible_friends, parse_uin_list
 from .pk_progress import PKProgress
 from .progress import DailyProgress
 from .notifications import NotificationManager
+from .mobile_protocol import reader_from_config
 
 
 LogCallback = Callable[[str], None]
@@ -49,11 +58,21 @@ class Scheduler:
 
     @staticmethod
     def _make_client(config: dict) -> NapCatClient:
+        mobile_reader = reader_from_config(config)
+        if mobile_reader is None:
+            raise QQPetError("手机 QQ 协议未启用，调度器不会回退到 NapCat 或桌面接口")
         return NapCatClient(
             config["napcat"]["url"],
             config["napcat"]["token"],
             config["account"]["pet_id"],
             float(config["napcat"]["timeout_seconds"]),
+            values_reader=mobile_reader.query_values if mobile_reader else None,
+            oidb_read_transport=mobile_reader.send_oidb_read if mobile_reader else None,
+            oidb_write_transport=(
+                mobile_reader.send_oidb_write_once if mobile_reader else None
+            ),
+            login_uin_reader=mobile_reader.get_self_uin if mobile_reader else None,
+            friend_list_reader=mobile_reader.query_friend_list if mobile_reader else None,
         )
 
     def log(self, message: str) -> None:
@@ -251,6 +270,41 @@ class Scheduler:
         )
         return filtered[0]
 
+    def _select_work_hire(self, client: NapCatClient, config: dict) -> PKOpponent | None:
+        """Choose a verified friend pet for work without blocking normal work."""
+        work = config["work"]
+        if not work.get("employ_friend", False):
+            return None
+        try:
+            candidates = tuple(
+                item
+                for item in client.query_pk_friend_candidates()
+                if item.user_id and item.pet_id
+            )
+        except QQPetError as exc:
+            candidates = ()
+            self.log(f"打工雇佣好友池暂时无法更新：{exc}")
+
+        if candidates:
+            # Prefer the strongest known friend. The QQ number is a stable
+            # tie-breaker when the server omits power or returns equal values.
+            return sorted(
+                candidates,
+                key=lambda item: (-(item.power or 0), item.user_id),
+            )[0]
+
+        pk = config.get("pk", {})
+        fallback = PKOpponent(
+            user_id=str(pk.get("opponent_uin", "")).strip(),
+            pet_id=str(pk.get("opponent_pet_id", "")).strip(),
+            nickname=str(pk.get("opponent_name", "")).strip(),
+            power=int(pk.get("opponent_power", 0)),
+        )
+        if fallback.user_id and fallback.pet_id:
+            self.log("打工雇佣使用已验证的备用好友；服务器好友宠物池本轮为空")
+            return fallback
+        return None
+
     def stop(self) -> None:
         self._stop.set()
 
@@ -290,10 +344,17 @@ class Scheduler:
     def _handle_story(self, client: NapCatClient, config: dict, story: StoryStatus) -> bool:
         state = self.progress.snapshot()
         pending = state.get("pending")
-        if story.story_id:
-            if self.progress.story_was_settled(story.story_id):
+        if story.story_id and self.progress.story_was_settled(story.story_id):
+            if not pending:
                 self.activity("上次任务已结算，正在准备下一项")
                 return False
+            # Some sessions keep returning the previous completed story while
+            # a newly submitted task is waiting for its own story ID.  Treat
+            # that stale response as no active story, so the pending guard
+            # below waits instead of submitting the task again.
+            self.activity("服务器仍返回上次任务，等待当前任务结果")
+            story = StoryStatus()
+        if story.story_id:
             if story.recallable and not pending:
                 mode = str(config["story"].get("employed_recall_mode", "best_split"))
                 progress = (
@@ -459,7 +520,7 @@ class Scheduler:
         self.log(
             f"每日好友列表已读取：共 {len(friends)} 人，候选 {len(candidates)} 人；"
             "真实协议已抓到（访问 0x96a4/0x96a6、踩踩 0x985b），"
-            "但 Windows/NapCat 会话不下发好友页面规则；"
+            "但手机 QQ 会话暂未下发好友页面规则；"
             "在访问记录或奖励可二次验证前不会计为成功"
         )
 
@@ -568,9 +629,15 @@ class Scheduler:
                 "soap": bath_inventory.soap,
                 "bath_ball": bath_inventory.bath_ball,
             }
-            self.status_callback(values, story, state)
+            display_story = (
+                StoryStatus()
+                if story.story_id and self.progress.story_was_settled(story.story_id)
+                else story
+            )
+            self.status_callback(values, display_story, state)
+        value_source = "手机协议" if getattr(client, "last_values_source", "desktop") == "mobile" else "桌面协议"
         self.log(
-                f"状态：金币 {values.gold:.2f}，心情 {values.feel:.1f}，体力 {values.hunger:.1f}，"
+            f"状态（{value_source}）：金币 {values.gold:.2f}，心情 {values.feel:.1f}，体力 {values.hunger:.1f}，"
             f"清洁 {values.clean:.1f}，饼干 {inventory.biscuits}，虾仁 {inventory.shrimp}，"
             f"今日 {state['counts']}"
         )
@@ -690,7 +757,18 @@ class Scheduler:
         if action == "school":
             self.activity("正在获取当前阶段课程")
             preferred_course = int(config["school"].get("course_sub_event", 0))
-            result = client.start_school(option, preferred_course)
+            try:
+                result = client.start_school(option, preferred_course)
+            except (QQPetEmptyResponse, QQPetConnectionError) as exc:
+                if exc.command_name != "OidbSvcTrpcTcp.0x975e_1":
+                    raise
+                self.progress.set_pending("school")
+                self.log(
+                    "开课请求返回空响应，发送结果暂不确定；已进入待确认状态，"
+                    "后续只查询服务器任务状态，不会重复开课"
+                )
+                self.activity("开课结果待确认，正在等待服务器状态")
+                return action
             self.progress.set_pending("school")
             course = result.course
             response_story = f"，storyId={result.story_id}" if result.story_id else ""
@@ -707,12 +785,60 @@ class Scheduler:
             career_type = int(config["work"].get("career_type", 0))
             preferred_job = int(config["work"].get("job_sub_event", 0))
             strategy = config["work"].get("strategy", "highest_total")
-            result = client.start_work(career_type, preferred_job, strategy)
+            hired_friend = self._select_work_hire(client, config)
+            hired_uin = hired_friend.user_id if hired_friend else ""
+            hired_pet_id = hired_friend.pet_id if hired_friend else ""
+            selected_job = None
+            if preferred_job:
+                try:
+                    selected_job = client.select_work_job(
+                        career_type,
+                        preferred_job,
+                        strategy,
+                        hired_pet_id,
+                    )
+                except QQPetError:
+                    selected_job = client.select_work_job(
+                        0,
+                        0,
+                        strategy,
+                        hired_pet_id,
+                    )
+                    self.log(
+                        f"指定岗位 {preferred_job} 当前不可用，"
+                        "已自动回退到服务器最高收益岗位"
+                    )
+                    preferred_job = 0
+            start_career = selected_job.career_type if selected_job else career_type
+            start_job = selected_job.sub_event_type if selected_job else preferred_job
+            try:
+                result = client.start_work(
+                    start_career,
+                    start_job,
+                    strategy,
+                    hired_uin,
+                    hired_pet_id,
+                )
+            except (QQPetEmptyResponse, QQPetConnectionError) as exc:
+                if exc.command_name != "OidbSvcTrpcTcp.0x975e_1":
+                    raise
+                self.progress.set_pending("work")
+                self.log(
+                    "开工请求返回空响应，发送结果暂不确定；已进入待确认状态，"
+                    "后续只查询服务器任务状态，不会重复开工"
+                )
+                self.activity("开工结果待确认，正在等待服务器状态")
+                return action
             self.progress.set_pending("work")
             job = result.job
             response_story = f"，storyId={result.story_id}" if result.story_id else ""
             selection = "指定" if preferred_job else "总收益最高"
-            friend_text = "，已雇佣好友" if result.hired_friend else ""
+            friend_name = (
+                hired_friend.nickname or hired_friend.pet_name or hired_friend.user_id
+                if hired_friend
+                else ""
+            )
+            friend_text = f"，已雇佣好友 {friend_name}" if result.hired_friend else ""
             self.log(
                 f"已选择{selection}岗位“{job.name}”"
                 f"（{job.career_name}，{job.duration}，收益 {job.reward}），"
@@ -726,7 +852,18 @@ class Scheduler:
         if action == "adventure":
             self.activity("正在获取服务器冒险选项")
             preferred_name = str(config["adventure"].get("option_name", ""))
-            result = client.start_adventure(preferred_name)
+            try:
+                result = client.start_adventure(preferred_name)
+            except (QQPetEmptyResponse, QQPetConnectionError) as exc:
+                if exc.command_name != "OidbSvcTrpcTcp.0x975e_1":
+                    raise
+                self.progress.set_pending("adventure")
+                self.log(
+                    "冒险请求返回空响应，发送结果暂不确定；已进入待确认状态，"
+                    "后续只查询服务器任务状态，不会重复开始冒险"
+                )
+                self.activity("冒险结果待确认，正在等待服务器状态")
+                return action
             self.progress.set_pending("adventure")
             option = result.option
             response_story = f"，storyId={result.story_id}" if result.story_id else ""
@@ -777,12 +914,16 @@ class Scheduler:
             try:
                 self.run_once()
                 self._record_success()
-            except QQPetError as exc:
+            except QQPetConnectionError as exc:
                 self.activity("接口连接异常，正在自动重连")
                 self.log(f"接口错误：{exc}")
                 self._record_failure(f"接口错误：{exc}")
                 if self._reconnect_until_ready():
                     continue
+            except QQPetError as exc:
+                self.activity("服务器暂时未返回结果，等待下一轮重试")
+                self.log(f"接口错误：{exc}")
+                self._record_failure(f"接口错误：{exc}")
             except Exception as exc:  # 保证后台循环不会因单轮配置错误退出
                 self.activity("本轮执行失败，等待重试")
                 self.log(f"本轮失败：{type(exc).__name__}: {exc}")
@@ -798,17 +939,17 @@ class Scheduler:
     def _reconnect_until_ready(self) -> bool:
         """Probe the stateless OneBot HTTP endpoint without replaying a pet action."""
         config = self.config_store.data
-        napcat = config["napcat"]
-        if not bool(napcat.get("auto_reconnect", True)):
+        mobile = config["mobile_protocol"]
+        if not bool(mobile.get("auto_reconnect", True)):
             self.activity("接口连接异常，自动重连未开启")
             return False
-        delay = max(0.1, float(napcat.get("reconnect_initial_seconds", 3)))
+        delay = max(0.1, float(mobile.get("reconnect_initial_seconds", 3)))
         while not self._stop.is_set():
             config = self.config_store.data
-            napcat = config["napcat"]
-            maximum = max(delay, float(napcat.get("reconnect_max_seconds", 60)))
+            mobile = config["mobile_protocol"]
+            maximum = max(delay, float(mobile.get("reconnect_max_seconds", 60)))
             self.activity(f"接口已断开，{delay:g} 秒后自动重连")
-            self.log(f"等待 {delay:g} 秒后探测 NapCat 登录会话")
+            self.log(f"等待 {delay:g} 秒后探测手机 QQ 协议会话")
             if self._stop.wait(delay):
                 return False
             try:
@@ -825,7 +966,7 @@ class Scheduler:
                 delay = min(maximum, delay * 2)
                 continue
             self.activity("接口连接已恢复，继续自动控制")
-            self.log(f"NapCat 登录会话已恢复：QQ {uin}；将从下一轮继续，不重发超时指令")
+            self.log(f"手机 QQ 协议登录会话已恢复：QQ {uin}；将从下一轮继续，不重发超时指令")
             self._record_success()
             return True
         return False

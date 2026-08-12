@@ -1,13 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
+frida_tools_data = collect_data_files("frida_tools", includes=["bridges/java.js"])
+
 a = Analysis(
     ["launcher.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[("hooks/qqpet_mobile_read_agent.js", "hooks")] + frida_tools_data,
     hiddenimports=[
         "encodings.idna",
         "main",
+        "frida",
+        "frida_tools",
         "onepush",
         "onepush.providers.bark",
         "onepush.providers.pushplus",
