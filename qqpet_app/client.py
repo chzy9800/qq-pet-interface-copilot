@@ -253,6 +253,14 @@ class WorkStartResult:
     response: OidbResponse | None = None
 
 
+class WorkEligibilityError(QQPetError):
+    """The server rejected a career or job because the pet is not eligible."""
+
+    def __init__(self, message: str, job: WorkJob | None = None) -> None:
+        self.job = job
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class AdventureOption:
     name: str
@@ -1079,11 +1087,13 @@ class NapCatClient:
         preferred_sub_event: int = 0,
         strategy: str = "highest_total",
         hired_pet_id: str = "",
+        excluded_sub_events: tuple[int, ...] = (),
     ) -> WorkJob:
         if strategy != "highest_total":
             raise QQPetError(f"未知岗位选择策略：{strategy}")
         overview = self.query_work_overview()
         available = [career for career in overview.careers if career.available]
+        all_available = list(available)
         if career_type:
             available = [
                 career for career in available if career.career_type == int(career_type)
@@ -1093,12 +1103,40 @@ class NapCatClient:
         if not available:
             raise QQPetError("服务器当前没有开放的职业")
 
-        jobs = [
-            job
-            for career in available
-            for job in self.query_work_jobs(career.career_type, hired_pet_id)
-            if job.can_do and job.sub_event_type > 0
-        ]
+        excluded = {int(value) for value in excluded_sub_events}
+        rejected_careers: list[WorkCareer] = []
+
+        def collect(careers: list[WorkCareer]) -> list[WorkJob]:
+            found: list[WorkJob] = []
+            for career in careers:
+                try:
+                    career_jobs = self.query_work_jobs(career.career_type, hired_pet_id)
+                except QQPetError as exc:
+                    if int(getattr(exc, "code", 0)) == 135061:
+                        rejected_careers.append(career)
+                        continue
+                    raise
+                found.extend(
+                    job
+                    for job in career_jobs
+                    if job.can_do
+                    and job.sub_event_type > 0
+                    and job.sub_event_type not in excluded
+                )
+            return found
+
+        jobs = collect(available)
+        # A saved career can remain marked open even when this pet does not yet
+        # satisfy its participation requirement. Fall back to other server-open
+        # careers instead of retrying the rejected career every scheduler tick.
+        if not jobs and career_type and rejected_careers:
+            jobs = collect(
+                [
+                    career
+                    for career in all_available
+                    if career.career_type != int(career_type)
+                ]
+            )
         if preferred_sub_event:
             selected = next(
                 (
@@ -1113,6 +1151,11 @@ class NapCatClient:
                     f"指定岗位 {preferred_sub_event} 不属于开放职业或暂不可用"
                 )
             return selected
+        if not jobs and rejected_careers:
+            names = "、".join(career.name or str(career.career_type) for career in rejected_careers)
+            raise WorkEligibilityError(
+                f"宠物尚未达到开放职业参与要求：{names}"
+            )
         if not jobs:
             raise QQPetError("服务器当前没有可执行的打工岗位")
 
@@ -1157,7 +1200,12 @@ class NapCatClient:
             + field_varint(7, job.sub_event_type)
             + field_varint(100, 2)
         )
-        response = self.send_oidb(*self.WORK_START, body)
+        try:
+            response = self.send_oidb(*self.WORK_START, body)
+        except QQPetError as exc:
+            if int(getattr(exc, "code", 0)) == 135061:
+                raise WorkEligibilityError(str(exc), job) from exc
+            raise
         story_id = first_string(parse_message(response.body), 1)
         return WorkStartResult(
             job=job,
