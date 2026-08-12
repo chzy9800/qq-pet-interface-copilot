@@ -7,7 +7,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Iterable
 
-from .client import QQFriend
+from .client import PKOpponent, QQFriend
 
 
 VISIT_STATUSES = ("success", "no_pet", "already_visited", "failed")
@@ -40,6 +40,28 @@ def eligible_friends(
         seen.add(uin)
         result.append(friend)
     return tuple(result)
+
+
+def current_pet_friends(
+    friends: Iterable[QQFriend],
+    live_pets: Iterable[PKOpponent],
+    captured_pets: Iterable[PKOpponent] = (),
+) -> dict[str, PKOpponent]:
+    """Merge pet IDs only for UINs that still exist in the current QQ list."""
+    current_uins = {friend.user_id for friend in friends if friend.user_id}
+    merged = {
+        pet.user_id: pet
+        for pet in captured_pets
+        if pet.user_id in current_uins and pet.pet_id
+    }
+    merged.update(
+        {
+            pet.user_id: pet
+            for pet in live_pets
+            if pet.user_id in current_uins and pet.pet_id
+        }
+    )
+    return merged
 
 
 class FriendVisitProgress:
@@ -120,6 +142,9 @@ class FriendVisitProgress:
     def completed(self, user_id: str) -> bool:
         record = self.snapshot()["friends"].get(str(user_id), {})
         return record.get("status") in {"success", "no_pet", "already_visited"}
+
+    def attempted(self, user_id: str) -> bool:
+        return str(user_id) in self.snapshot()["friends"]
 
     def summary(self) -> dict[str, int]:
         records = self.snapshot()["friends"].values()

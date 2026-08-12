@@ -382,7 +382,7 @@ class NapCatClient:
     PAGE_RULES = ("OidbSvcTrpcTcp.0x96a4_1", 38564, 1)
     FRIEND_PROFILE = ("OidbSvcTrpcTcp.0x976c_0", 38764, 0)
     FRIEND_POKE = ("OidbSvcTrpcTcp.0x985b_0", 39003, 0)
-    FRIEND_VISIT_PATH = (1000, 100, 101)
+    FRIEND_VISIT_PATH = (1000, 100, 0)
     STORY_STATUS = ("OidbSvcTrpcTcp.0x975a_1", 38746, 1)
     STORY_SETTLE = ("OidbSvcTrpcTcp.0x9760_1", 38752, 1)
     SCHOOL_OVERVIEW = ("OidbSvcTrpcTcp.0x9b60_1", 39776, 1)
@@ -926,12 +926,7 @@ class NapCatClient:
     def query_friend_visit_rules(
         self, friend_pet_id: str, execute_ext_info: bytes = b""
     ) -> PageRules:
-        """Read the friend-home rules using the real Android request shape.
-
-        A Windows/NapCat session currently returns count=0 even when the full
-        Android payload is replayed. Callers must treat that as unsupported,
-        not as a completed visit.
-        """
+        """Read the friend-home rules using the real Android request shape."""
         return self.query_page_rules(
             self.FRIEND_VISIT_PATH[0],
             pet_id=friend_pet_id,
@@ -940,14 +935,24 @@ class NapCatClient:
             platform=0,
         )
 
+    @staticmethod
+    def resolve_friend_visit_path(rules: PageRules) -> tuple[int, int, int]:
+        paths = [
+            path for path in rules.paths if path[0] == 1000 and path[1] == 100
+        ]
+        if not paths:
+            raise QQPetError("服务器好友页面规则没有下发访问事件 1000/100/*")
+        return paths[0]
+
     def report_friend_visit(
         self,
         friend_uin: str,
         friend_pet_id: str,
         execute_ext_info: bytes = b"",
+        path: tuple[int, int, int] | None = None,
     ) -> OidbResponse:
-        page, event_type, sub_event = self.FRIEND_VISIT_PATH
-        path = (
+        page, event_type, sub_event = path or self.FRIEND_VISIT_PATH
+        path_body = (
             field_varint(1, page)
             + field_varint(2, event_type)
             + field_varint(3, sub_event)
@@ -955,10 +960,25 @@ class NapCatClient:
         body = (
             field_string(1, friend_pet_id)
             + field_string(2, str(friend_uin))
-            + field_bytes(3, path)
+            + field_bytes(3, path_body)
             + field_bytes(4, execute_ext_info)
         )
         return self.send_oidb(*self.REPORT_EVENT, body)
+
+    def visit_friend_verified(
+        self, friend_uin: str, friend_pet_id: str
+    ) -> tuple[tuple[int, int, int], OidbResponse, PageRules]:
+        before = self.query_friend_visit_rules(friend_pet_id)
+        path = self.resolve_friend_visit_path(before)
+        response = self.report_friend_visit(friend_uin, friend_pet_id, path=path)
+        # Android's PetPbDelegate callback treats a successful OIDB transport
+        # callback as ReportEvent success. 0x96a6_1 normally has no response
+        # message, so an empty body is expected and must not be mistaken for a
+        # failed visit. Re-read the target page below as the second check.
+        after = self.query_friend_visit_rules(friend_pet_id)
+        if not after.paths or (after.declared_count is not None and after.declared_count <= 0):
+            raise QQPetError("访问返回后未能重新读取好友页面规则，无法确认访问生效")
+        return path, response, after
 
     def poke_friend(self, friend_uin: str) -> OidbResponse:
         try:

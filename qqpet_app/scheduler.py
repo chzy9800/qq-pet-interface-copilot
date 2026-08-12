@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import random
 import threading
 import time
 from datetime import datetime
@@ -18,7 +19,12 @@ from .client import (
     WorkEligibilityError,
 )
 from .config import ConfigStore
-from .friend_visits import FriendVisitProgress, eligible_friends, parse_uin_list
+from .friend_visits import (
+    FriendVisitProgress,
+    current_pet_friends,
+    eligible_friends,
+    parse_uin_list,
+)
 from .pk_progress import PKProgress
 from .progress import DailyProgress
 from .notifications import NotificationManager
@@ -583,22 +589,85 @@ class Scheduler:
         if self.friend_progress.scanned():
             return
 
+        login_uin = client.check_connection()
         friends = client.query_friend_list()
-        candidates = eligible_friends(
+        eligible = eligible_friends(
             friends,
-            str(config["account"]["uin"]),
+            login_uin,
             str(visit_config.get("whitelist", "")),
             str(visit_config.get("exclude", "")),
         )
+        try:
+            live_pets = client.query_pk_friend_candidates()
+        except Exception as exc:
+            self.friend_progress.record_scan(len(friends), 0)
+            self.log(f"每日好友宠物池读取失败：{exc}；本轮未发送访问请求")
+            return
+        verified_pets = current_pet_friends(friends, live_pets)
+        verified_pets.pop(login_uin, None)
+        for friend in eligible:
+            if friend.user_id not in verified_pets and not self.friend_progress.attempted(friend.user_id):
+                self.friend_progress.mark(
+                    friend.user_id,
+                    "no_pet",
+                    detail="服务器当前宠物好友池未返回该 QQ",
+                )
+        candidates = tuple(
+            friend
+            for friend in eligible
+            if friend.user_id in verified_pets
+            and not self.friend_progress.attempted(friend.user_id)
+        )
         limit = int(visit_config.get("max_per_day", 0))
         if limit > 0:
-            candidates = candidates[:limit]
+            summary = self.friend_progress.summary()
+            used = summary["success"] + summary["already_visited"]
+            candidates = candidates[: max(0, limit - used)]
         self.friend_progress.record_scan(len(friends), len(candidates))
+        if config["safety"].get("safe_mode", True):
+            self.log(
+                f"每日好友列表已读取：共 {len(friends)} 人，当前宠物好友 "
+                f"{len(verified_pets)} 人，候选 {len(candidates)} 人；安全模式未发送访问"
+            )
+            return
+        succeeded = 0
+        failed = 0
+        for index, friend in enumerate(candidates):
+            pet = verified_pets[friend.user_id]
+            try:
+                path, response, after_rules = client.visit_friend_verified(
+                    friend.user_id, pet.pet_id
+                )
+                poked = False
+                if visit_config.get("poke_enabled", False):
+                    poked = bool(client.poke_friend(friend.user_id).body)
+                self.friend_progress.mark(
+                    friend.user_id,
+                    "success",
+                    pet_id=pet.pet_id,
+                    detail=(
+                        f"动态路径 {path[0]}/{path[1]}/{path[2]}；"
+                        "手机协议已接收访问事件；"
+                        f"复查规则 {after_rules.declared_count} 条"
+                    ),
+                    poked=poked,
+                )
+                succeeded += 1
+            except Exception as exc:
+                self.friend_progress.mark(
+                    friend.user_id,
+                    "failed",
+                    pet_id=pet.pet_id,
+                    detail=str(exc),
+                )
+                failed += 1
+            if index + 1 < len(candidates):
+                minimum = float(visit_config.get("interval_min_seconds", 3))
+                maximum = float(visit_config.get("interval_max_seconds", 5))
+                self._stop.wait(random.uniform(minimum, max(minimum, maximum)))
         self.log(
-            f"每日好友列表已读取：共 {len(friends)} 人，候选 {len(candidates)} 人；"
-            "真实协议已抓到（访问 0x96a4/0x96a6、踩踩 0x985b），"
-            "但手机 QQ 会话暂未下发好友页面规则；"
-            "在访问记录或奖励可二次验证前不会计为成功"
+            f"每日好友访问完成：QQ 好友 {len(friends)} 人，当前宠物好友 "
+            f"{len(verified_pets)} 人，本轮成功 {succeeded} 人、失败 {failed} 人"
         )
 
     def _run_friend_care_if_due(

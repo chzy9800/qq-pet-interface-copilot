@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import queue
+import random
 import sys
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +17,11 @@ from qqpet_app.client import (
     QQPetEmptyResponse,
 )
 from qqpet_app.config import ConfigStore
-from qqpet_app.friend_visits import FriendVisitProgress, eligible_friends
+from qqpet_app.friend_visits import (
+    FriendVisitProgress,
+    current_pet_friends,
+    eligible_friends,
+)
 from qqpet_app.friend_pet_cache import load_latest_friend_pet_capture
 from qqpet_app.interface_tests import InterfaceTestResult, InterfaceTestRunner
 from qqpet_app.notifications import NotificationManager
@@ -1963,47 +1969,93 @@ class MainWindow(tk.Tk):
             try:
                 config = self.config_store.data
                 client = Scheduler._make_client(config)
+                login_uin = client.check_connection()
                 friends = client.query_friend_list()
                 visit_config = config["friend_visits"]
                 candidates = eligible_friends(
                     friends,
-                    str(config["account"]["uin"]),
+                    login_uin,
                     str(visit_config.get("whitelist", "")),
                     str(visit_config.get("exclude", "")),
                 )
-                verified_pets = {
-                    opponent.user_id: opponent
-                    for opponent in load_latest_friend_pet_capture(FRIEND_VISIT_DIR)
-                }
+                pool_error = ""
+                try:
+                    live_pets = client.query_pk_friend_candidates()
+                except Exception as exc:
+                    live_pets = ()
+                    pool_error = str(exc)
+                captured_pets = load_latest_friend_pet_capture(FRIEND_VISIT_DIR)
+                verified_pets = current_pet_friends(friends, live_pets, captured_pets)
+                verified_pets.pop(login_uin, None)
+                progress = FriendVisitProgress(FRIEND_VISIT_DIR)
+                if not pool_error:
+                    for friend in candidates:
+                        if friend.user_id not in verified_pets and not progress.attempted(friend.user_id):
+                            progress.mark(
+                                friend.user_id,
+                                "no_pet",
+                                detail="服务器当前宠物好友池未返回该 QQ",
+                            )
                 candidates = tuple(
                     friend
                     for friend in candidates
                     if str(friend.user_id) in verified_pets
+                    and not progress.attempted(friend.user_id)
                 )
                 limit = int(visit_config.get("max_per_day", 0))
                 if limit > 0:
-                    candidates = candidates[:limit]
+                    summary_before = progress.summary()
+                    used = summary_before["success"] + summary_before["already_visited"]
+                    candidates = candidates[: max(0, limit - used)]
                 protocol_state = "no_candidates"
-                protocol_detail = "没有可用于协议检测的宠物好友"
-                if candidates:
-                    probe = verified_pets[str(candidates[0].user_id)]
-                    try:
-                        rules = client.query_friend_visit_rules(probe.pet_id)
-                        if rules.allows(client.FRIEND_VISIT_PATH):
-                            protocol_state = "rules_available"
-                            protocol_detail = "服务器已下发真实好友访问路径"
-                        elif rules.declared_count == 0:
-                            protocol_state = "windows_unsupported"
-                            protocol_detail = (
-                                "手机 QQ 会话返回好友页面规则 count=0"
+                protocol_detail = "今天没有尚未处理的宠物好友"
+                visited = 0
+                failed = 0
+                if candidates and config["safety"].get("safe_mode", True):
+                    protocol_state = "safe_mode"
+                    protocol_detail = f"安全模式：识别到 {len(candidates)} 位候选，未发送访问"
+                elif candidates:
+                    for index, friend in enumerate(candidates):
+                        pet = verified_pets[friend.user_id]
+                        try:
+                            path, response, after_rules = client.visit_friend_verified(
+                                friend.user_id, pet.pet_id
                             )
-                        else:
-                            protocol_state = "path_missing"
-                            protocol_detail = "服务器响应中没有访问路径 1000/100/101"
-                    except Exception as exc:
-                        protocol_state = "probe_failed"
-                        protocol_detail = f"好友协议检测失败：{exc}"
-                progress = FriendVisitProgress(FRIEND_VISIT_DIR)
+                            poked = False
+                            poke_detail = ""
+                            if visit_config.get("poke_enabled", False):
+                                poke_response = client.poke_friend(friend.user_id)
+                                poked = bool(poke_response.body)
+                                poke_detail = "；踩踩已确认" if poked else "；踩踩未返回业务确认"
+                            progress.mark(
+                                friend.user_id,
+                                "success",
+                                pet_id=pet.pet_id,
+                                detail=(
+                                    f"动态路径 {path[0]}/{path[1]}/{path[2]}；"
+                                    "手机协议已接收访问事件；"
+                                    f"复查规则 {after_rules.declared_count} 条{poke_detail}"
+                                ),
+                                poked=poked,
+                            )
+                            visited += 1
+                        except Exception as exc:
+                            progress.mark(
+                                friend.user_id,
+                                "failed",
+                                pet_id=pet.pet_id,
+                                detail=str(exc),
+                            )
+                            failed += 1
+                        if index + 1 < len(candidates):
+                            minimum = float(visit_config.get("interval_min_seconds", 3))
+                            maximum = float(visit_config.get("interval_max_seconds", 5))
+                            time.sleep(random.uniform(minimum, max(minimum, maximum)))
+                    protocol_state = "visited" if visited else "visit_failed"
+                    protocol_detail = f"真实访问成功 {visited} 人，失败 {failed} 人"
+                elif pool_error:
+                    protocol_state = "pool_failed"
+                    protocol_detail = f"宠物好友池读取失败：{pool_error}"
                 progress.record_scan(len(friends), len(candidates))
                 self.events.put(
                     (
@@ -2015,6 +2067,8 @@ class MainWindow(tk.Tk):
                             progress.summary(),
                             protocol_state,
                             protocol_detail,
+                            visited,
+                            failed,
                         ),
                     )
                 )
@@ -2282,6 +2336,8 @@ class MainWindow(tk.Tk):
                         summary,
                         protocol_state,
                         protocol_detail,
+                        visited,
+                        failed,
                     ) = payload
                     self.status_vars["friend_visits"].set(
                         f"成功{summary['success']} 无宠物{summary['no_pet']} "
@@ -2292,11 +2348,10 @@ class MainWindow(tk.Tk):
                         f"已确认有宠物 {verified_pet_count} 人，本轮候选 {eligible} 人；"
                         f"{protocol_detail}。"
                     )
-                    if protocol_state == "rules_available":
-                        message += (
-                            "真实协议已识别，但访问记录/奖励的二次验证尚未通过，"
-                            "本轮未计为成功"
-                        )
+                    if protocol_state == "visited":
+                        message += f"本轮真实访问 {visited} 人，失败 {failed} 人"
+                    elif protocol_state == "visit_failed":
+                        message += f"已发送 {failed} 个访问请求，但均未通过二次验证"
                     else:
                         message += "本轮真实访问 0 人，未发送访问或踩踩写请求"
                     self._append_log(message)

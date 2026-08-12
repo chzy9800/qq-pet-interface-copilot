@@ -649,9 +649,18 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             class FakeClient:
                 scans = 0
 
+                def check_connection(self):
+                    return "99999"
+
                 def query_friend_list(self):
                     self.scans += 1
                     return (QQFriend("10001", "甲"), QQFriend("10002", "乙"))
+
+                def query_pk_friend_candidates(self):
+                    return (
+                        PKOpponent("10001", "pet-one", nickname="甲"),
+                        PKOpponent("10002", "pet-two", nickname="乙"),
+                    )
 
                 def query_values(self):
                     return PetValues(gold=1000, hunger=100, clean=100)

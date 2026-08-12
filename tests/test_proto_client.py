@@ -397,7 +397,7 @@ class ProtoAndClientTests(unittest.TestCase):
                 self.assertEqual(first_varint(request, 10), 0)
                 self.assertEqual(first_varint(request, 99), 0)
                 rules = field_string(1, '{"count":1}')
-                path = field_varint(1, 1000) + field_varint(2, 100) + field_varint(3, 101)
+                path = field_varint(1, 1000) + field_varint(2, 100) + field_varint(3, 0)
                 rules += field_bytes(2, field_bytes(1, path))
                 return oidb_response(38564, 1, rules)
             if calls == 2:
@@ -411,7 +411,7 @@ class ProtoAndClientTests(unittest.TestCase):
                         first_varint(path, 2),
                         first_varint(path, 3),
                     ),
-                    (1000, 100, 101),
+                    (1000, 100, 0),
                 )
                 self.assertEqual(first_bytes(request, 4), b"ext")
                 return oidb_response(38566, 1, b"visit-ack")
@@ -421,9 +421,37 @@ class ProtoAndClientTests(unittest.TestCase):
 
         client = NapCatClient("http://unused", "token", "self-pet", transport=transport)
         rules = client.query_friend_visit_rules("friend-pet", b"ext")
-        self.assertTrue(rules.allows((1000, 100, 101)))
+        self.assertTrue(rules.allows((1000, 100, 0)))
         self.assertEqual(client.report_friend_visit("10001", "friend-pet", b"ext").body, b"visit-ack")
         self.assertEqual(client.poke_friend("10001").body, b"poke-ack")
+
+    def test_verified_friend_visit_uses_dynamic_server_path_and_rereads_rules(self) -> None:
+        calls = 0
+
+        def transport(command: str, data: str) -> dict:
+            nonlocal calls
+            calls += 1
+            request = parse_message(first_bytes(parse_message(bytes.fromhex(data)), 4))
+            if command == "OidbSvcTrpcTcp.0x96a4_1":
+                rules = field_string(1, '{"count":1}')
+                dynamic = field_varint(1, 1000) + field_varint(2, 100) + field_varint(3, 7)
+                return oidb_response(38564, 1, rules + field_bytes(2, field_bytes(1, dynamic)))
+            self.assertEqual(command, "OidbSvcTrpcTcp.0x96a6_1")
+            path = parse_message(first_bytes(request, 3))
+            self.assertEqual(
+                (first_varint(path, 1), first_varint(path, 2), first_varint(path, 3)),
+                (1000, 100, 7),
+            )
+            # The Android ReportEvent callback considers retcode=0 successful;
+            # this endpoint normally returns no protobuf response body.
+            return oidb_response(38566, 1, b"")
+
+        client = NapCatClient("http://unused", "token", "self-pet", transport=transport)
+        path, response, after = client.visit_friend_verified("10001", "friend-pet")
+        self.assertEqual(path, (1000, 100, 7))
+        self.assertEqual(response.body, b"")
+        self.assertEqual(after.declared_count, 1)
+        self.assertEqual(calls, 3)
 
     def test_friend_visit_count_zero_is_not_treated_as_supported(self) -> None:
         body = field_string(1, '{"pkey":"0-65-0-0-0","count":0}')

@@ -4,9 +4,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from qqpet_app.client import QQFriend
+from qqpet_app.client import PKOpponent, QQFriend
 from qqpet_app.friend_visits import (
     FriendVisitProgress,
+    current_pet_friends,
     eligible_friends,
     parse_uin_list,
 )
@@ -42,6 +43,17 @@ class FriendVisitTests(unittest.TestCase):
             self.assertEqual(next_day.summary()["success"], 0)
             self.assertFalse(next_day.scanned())
             self.assertNotEqual(first.path, next_day.path)
+
+    def test_historical_pet_cache_is_limited_to_current_qq_friends(self) -> None:
+        friends = (QQFriend("100", "甲"), QQFriend("200", "乙"))
+        live = (PKOpponent("100", "live-100"),)
+        captured = (
+            PKOpponent("100", "old-100"),
+            PKOpponent("999", "stale-pet"),
+        )
+        matched = current_pet_friends(friends, live, captured)
+        self.assertEqual(set(matched), {"100"})
+        self.assertEqual(matched["100"].pet_id, "live-100")
 
 
 if __name__ == "__main__":
