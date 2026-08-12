@@ -2,11 +2,27 @@ from __future__ import annotations
 
 import unittest
 
-from qqpet_app.mobile_protocol import MobileProtocolReader
+from qqpet_app.mobile_protocol import (
+    MobileProtocolReader,
+    frida_architecture,
+    select_adb_serial,
+)
 from qqpet_app.proto import field_bytes, field_fixed32
 
 
 class MobileProtocolTests(unittest.TestCase):
+    def test_select_adb_serial_prefers_configured_online_device(self) -> None:
+        output = "List of devices attached\n127.0.0.1:16384\tdevice\nemulator-5554\tdevice\n"
+        self.assertEqual(select_adb_serial(output, "emulator-5554"), "emulator-5554")
+
+    def test_select_adb_serial_falls_back_to_running_mumu_instance(self) -> None:
+        output = "List of devices attached\n127.0.0.1:16416\toffline\n127.0.0.1:16384\tdevice\n"
+        self.assertEqual(select_adb_serial(output, "127.0.0.1:16416"), "127.0.0.1:16384")
+
+    def test_frida_architecture_uses_kernel_architecture(self) -> None:
+        self.assertEqual(frida_architecture("aarch64\n"), "arm64")
+        self.assertEqual(frida_architecture("x86_64"), "x86_64")
+
     def test_mobile_state_and_gold_packets_are_decoded(self) -> None:
         display = b"".join(
             field_bytes(index, field_fixed32(3, value))

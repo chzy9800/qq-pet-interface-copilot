@@ -11,6 +11,7 @@ from tkinter import messagebox, ttk
 
 from qqpet_app.bootstrap import ensure_vc_runtime
 from qqpet_app.config import ConfigStore
+from qqpet_app.mobile_protocol import reader_from_config
 from qqpet_app.scheduler import Scheduler
 
 
@@ -116,6 +117,14 @@ class Launcher(tk.Tk):
             self.events.put(("log", "正在连接安卓模拟器中的手机 QQ 协议……"))
             config = self.store.data
             config["mobile_protocol"]["enabled"] = True
+            reader = reader_from_config(config)
+            if reader is None:
+                raise RuntimeError("手机协议未启用")
+            serial = reader.prepare_runtime(
+                DOWNLOAD_DIR, lambda message: self.events.put(("log", message))
+            )
+            config["mobile_protocol"]["adb_path"] = str(reader.adb_path or "")
+            config["mobile_protocol"]["adb_serial"] = serial
             client = Scheduler._make_client(config)
             logged_in_uin = client.check_connection()
             self.events.put(("log", f"已连接模拟器手机 QQ {logged_in_uin}。"))
@@ -140,7 +149,18 @@ class Launcher(tk.Tk):
             ensure_vc_runtime(
                 DOWNLOAD_DIR, lambda message: self.events.put(("log", message))
             )
-            self.events.put(("log", "基础运行环境检查完成，正在连接模拟器手机 QQ……"))
+            config = self.store.data
+            config["mobile_protocol"]["enabled"] = True
+            reader = reader_from_config(config)
+            if reader is None:
+                raise RuntimeError("手机协议未启用")
+            serial = reader.prepare_runtime(
+                DOWNLOAD_DIR, lambda message: self.events.put(("log", message))
+            )
+            config["mobile_protocol"]["adb_path"] = str(reader.adb_path or "")
+            config["mobile_protocol"]["adb_serial"] = serial
+            self.store.save(config)
+            self.events.put(("log", "基础运行环境和 MuMu 手机协议均已准备完成。"))
             self.events.put(("retry", None))
         except Exception as exc:
             self.events.put(("error", str(exc)))

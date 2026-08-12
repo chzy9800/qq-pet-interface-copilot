@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import lzma
+import os
+import shutil
 import subprocess
 import sys
 import threading
+import time
+import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .client import PetValues, QQFriend, QQPetError
 from .proto import (
@@ -22,9 +28,111 @@ from .proto import (
 _READER_CACHE: dict[tuple[str, ...], "MobileProtocolReader"] = {}
 _READER_CACHE_LOCK = threading.Lock()
 
+FRIDA_VERSION = "17.16.4"
+FRIDA_SERVER_SHA256 = {
+    "arm64": "98be2873c9eb6f3935954cc8eabcbe02a74671f0dbf8d2802301a73c5f35fed4",
+    "x86_64": "c086953450cb5ed6de6220598713510b286f86e039adb75ee95b2f14c6873bba",
+}
+
 
 class MobileProtocolUnavailable(QQPetError):
     """The local Android QQ read bridge is unavailable."""
+
+
+def _mumu_install_locations() -> list[Path]:
+    locations: list[Path] = []
+    if sys.platform == "win32":
+        try:
+            import winreg
+
+            roots = (
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+                (winreg.HKEY_CURRENT_USER, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            )
+            for hive, key_name in roots:
+                try:
+                    with winreg.OpenKey(hive, key_name) as key:
+                        for index in range(winreg.QueryInfoKey(key)[0]):
+                            try:
+                                with winreg.OpenKey(key, winreg.EnumKey(key, index)) as item:
+                                    name = str(winreg.QueryValueEx(item, "DisplayName")[0])
+                                    if "MuMu" not in name:
+                                        continue
+                                    location = str(winreg.QueryValueEx(item, "InstallLocation")[0]).strip()
+                                    if location:
+                                        locations.append(Path(location))
+                            except OSError:
+                                continue
+                except OSError:
+                    continue
+        except (ImportError, OSError):
+            pass
+    for variable in ("ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(variable)
+        if base:
+            locations.append(Path(base) / "Netease" / "MuMuPlayer-12.0")
+    for drive in ("C:\\", "D:\\", "E:\\"):
+        locations.append(Path(drive) / "Program Files" / "Netease" / "MuMuPlayer-12.0")
+    return locations
+
+
+def discover_adb_path(project_root: str | Path, configured: str | Path = "") -> Path:
+    root = Path(project_root)
+    candidates: list[Path] = []
+    if configured:
+        candidates.append(Path(configured))
+    candidates.extend(
+        (
+            root / "tools" / "platform-tools" / "adb.exe",
+            root / "references" / "qq-pet-copilot" / "scrcpy-win64" / "adb.exe",
+        )
+    )
+    for location in _mumu_install_locations():
+        candidates.extend(
+            (
+                location / "nx_main" / "adb.exe",
+                location / "nx_device" / "12.0" / "shell" / "adb.exe",
+                location / "nx_device" / "15.0" / "shell" / "adb.exe",
+            )
+        )
+    on_path = shutil.which("adb")
+    if on_path:
+        candidates.append(Path(on_path))
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = str(candidate).casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if candidate.is_file():
+            return candidate
+    return Path()
+
+
+def select_adb_serial(output: str, preferred: str = "") -> str:
+    devices: list[str] = []
+    for line in output.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[1] == "device":
+            devices.append(parts[0])
+    if preferred and preferred in devices:
+        return preferred
+    if not devices:
+        return ""
+    return sorted(
+        devices,
+        key=lambda value: (not value.startswith("127.0.0.1:"), not value.startswith("emulator-"), value),
+    )[0]
+
+
+def frida_architecture(uname_machine: str) -> str:
+    value = uname_machine.strip().lower()
+    if value in {"aarch64", "arm64"}:
+        return "arm64"
+    if value in {"x86_64", "amd64"}:
+        return "x86_64"
+    raise MobileProtocolUnavailable(f"暂不支持该模拟器 CPU 架构：{uname_machine or '未知'}")
 
 
 class MobileProtocolReader:
@@ -121,9 +229,134 @@ class MobileProtocolReader:
             except ImportError as exc:
                 raise MobileProtocolUnavailable("本机缺少手机协议桥接组件 Frida") from exc
 
+    def _adb(self, *args: str, timeout: float = 15, check: bool = True) -> subprocess.CompletedProcess[str]:
+        if not self.adb_path or not self.adb_path.is_file():
+            raise MobileProtocolUnavailable("未找到 MuMu 模拟器的 ADB，请确认 MuMu 12 已正确安装")
+        command = [str(self.adb_path)]
+        if self.adb_serial:
+            command.extend(("-s", self.adb_serial))
+        command.extend(args)
+        try:
+            return subprocess.run(
+                command,
+                check=check,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise MobileProtocolUnavailable(f"MuMu ADB 操作失败：{exc}") from exc
+
+    def _resolve_device(self) -> str:
+        if not self.adb_path or not self.adb_path.is_file():
+            raise MobileProtocolUnavailable("未找到 MuMu 模拟器的 ADB，请确认 MuMu 12 已正确安装")
+        base = [str(self.adb_path)]
+        flags = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+        subprocess.run(base + ["start-server"], capture_output=True, timeout=10, **flags)
+        result = subprocess.run(
+            base + ["devices"], capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=10, **flags
+        )
+        serial = select_adb_serial(result.stdout, self.adb_serial)
+        if not serial and self.adb_serial and ":" in self.adb_serial:
+            subprocess.run(base + ["connect", self.adb_serial], capture_output=True, timeout=10, **flags)
+            result = subprocess.run(
+                base + ["devices"], capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=10, **flags
+            )
+            serial = select_adb_serial(result.stdout, self.adb_serial)
+        if not serial:
+            raise MobileProtocolUnavailable("未发现已启动的 MuMu 模拟器，请先打开模拟器")
+        self.adb_serial = serial
+        return serial
+
+    def prepare_runtime(
+        self,
+        download_dir: str | Path,
+        log: Callable[[str], None] | None = None,
+    ) -> str:
+        report = log or (lambda _message: None)
+        serial = self._resolve_device()
+        report(f"已发现 MuMu 模拟器：{serial}")
+        root_result = self._adb("root", timeout=12, check=False)
+        if root_result.returncode != 0 or "cannot run as root" in (root_result.stdout + root_result.stderr).lower():
+            raise MobileProtocolUnavailable("MuMu 未开放 ADB Root，请在模拟器设置中开启 Root 权限后重启")
+        self._adb("wait-for-device", timeout=20)
+        identity = self._adb("shell", "id", timeout=10).stdout
+        if "uid=0(root)" not in identity:
+            raise MobileProtocolUnavailable("MuMu ADB 尚未取得 Root 权限，请开启 Root 后重试")
+
+        machine = self._adb(
+            "shell", "getprop", "ro.product.cpu.abi", timeout=10
+        ).stdout.strip()
+        if not machine:
+            machine = self._adb("shell", "uname", "-m", timeout=10).stdout
+        architecture = frida_architecture(machine)
+        remote_version = self._adb(
+            "shell", "/data/local/tmp/frida-server", "--version", timeout=8, check=False
+        ).stdout.strip()
+        remote_architecture = self._adb(
+            "shell", "cat", "/data/local/tmp/frida-server.arch", timeout=8, check=False
+        ).stdout.strip()
+        if remote_version != FRIDA_VERSION or remote_architecture != architecture:
+            directory = Path(download_dir)
+            directory.mkdir(parents=True, exist_ok=True)
+            archive = directory / f"frida-server-{FRIDA_VERSION}-android-{architecture}.xz"
+            server = directory / f"frida-server-{FRIDA_VERSION}-android-{architecture}"
+            expected = FRIDA_SERVER_SHA256[architecture]
+            if not archive.is_file() or hashlib.sha256(archive.read_bytes()).hexdigest() != expected:
+                report("正在从 Frida 官方 Release 下载手机协议运行组件……")
+                url = (
+                    f"https://github.com/frida/frida/releases/download/{FRIDA_VERSION}/"
+                    f"frida-server-{FRIDA_VERSION}-android-{architecture}.xz"
+                )
+                request = urllib.request.Request(url, headers={"User-Agent": "QQPetInterfaceCopilot"})
+                with urllib.request.urlopen(request, timeout=60) as response, archive.open("wb") as target:
+                    shutil.copyfileobj(response, target)
+                actual = hashlib.sha256(archive.read_bytes()).hexdigest()
+                if actual != expected:
+                    archive.unlink(missing_ok=True)
+                    raise MobileProtocolUnavailable("Frida 官方组件校验失败，已拒绝安装")
+            if not server.is_file():
+                with lzma.open(archive, "rb") as source, server.open("wb") as target:
+                    shutil.copyfileobj(source, target)
+            report("正在安装手机协议组件到 MuMu……")
+            self._adb("push", str(server), "/data/local/tmp/frida-server", timeout=90)
+            self._adb("shell", "chmod", "755", "/data/local/tmp/frida-server")
+            self._adb(
+                "shell",
+                f"printf '%s' {architecture} > /data/local/tmp/frida-server.arch",
+            )
+
+        running = self._adb("shell", "pidof", "frida-server", timeout=8, check=False).stdout.strip()
+        if not running:
+            self._adb(
+                "shell",
+                "/data/local/tmp/frida-server",
+                "--daemonize",
+                timeout=10,
+                check=False,
+            )
+            for _ in range(20):
+                time.sleep(0.25)
+                running = self._adb(
+                    "shell", "pidof", "frida-server", timeout=8, check=False
+                ).stdout.strip()
+                if running:
+                    break
+        if not running:
+            raise MobileProtocolUnavailable("手机协议组件未能在 MuMu 中启动")
+        self._ensure_forward()
+        report("MuMu 手机协议环境已就绪")
+        return serial
+
     def _ensure_forward(self) -> None:
         if not self.adb_path or not self.adb_path.is_file():
-            return
+            raise MobileProtocolUnavailable("未找到 MuMu 模拟器的 ADB")
+        self._resolve_device()
         try:
             subprocess.run(
                 [
@@ -168,16 +401,34 @@ class MobileProtocolReader:
 
         self._ensure_forward()
         frida = self._load_frida()
-        agent_path = self.project_root / "hooks" / "qqpet_mobile_read_agent.js"
+        bundled_root = Path(getattr(sys, "_MEIPASS", self.project_root))
+        agent_path = next(
+            (
+                item
+                for item in (
+                    self.project_root / "hooks" / "qqpet_mobile_read_agent.js",
+                    bundled_root / "hooks" / "qqpet_mobile_read_agent.js",
+                )
+                if item.is_file()
+            ),
+            Path(),
+        )
         if not agent_path.is_file():
             raise MobileProtocolUnavailable("手机协议读取脚本不存在")
         try:
             manager = frida.get_device_manager()
             device = manager.add_remote_device(self.endpoint)
-            process = next(
-                (item for item in device.enumerate_processes() if item.name == self.process_name),
-                None,
-            )
+            processes = device.enumerate_processes()
+            process = next((item for item in processes if item.name == self.process_name), None)
+            # MuMu may expose an Android app label (for example "QQ") instead
+            # of its package name through Frida.  Resolve the package PID over
+            # ADB and then match the same PID in Frida's process list.
+            if process is None and self.adb_path and self.adb_path.is_file():
+                pid_text = self._adb(
+                    "shell", "pidof", self.process_name, timeout=8, check=False
+                ).stdout.strip()
+                pids = {int(value) for value in pid_text.split() if value.isdigit()}
+                process = next((item for item in processes if item.pid in pids), None)
             if process is None:
                 raise MobileProtocolUnavailable("模拟器 QQ 尚未启动或未登录")
             session = device.attach(process.pid)
@@ -185,7 +436,17 @@ class MobileProtocolReader:
             # Frida 17 moved language bridges out of the core runtime.  The
             # command-line REPL prepends this bridge automatically; direct
             # Python sessions have to do it explicitly.
-            bridge_path = self.project_root / "tools" / "py312frida" / "frida_tools" / "bridges" / "java.js"
+            bridge_candidates = [
+                self.project_root / "tools" / "py312frida" / "frida_tools" / "bridges" / "java.js",
+                bundled_root / "frida_tools" / "bridges" / "java.js",
+            ]
+            try:
+                import frida_tools  # type: ignore
+
+                bridge_candidates.append(Path(frida_tools.__file__).resolve().parent / "bridges" / "java.js")
+            except ImportError:
+                pass
+            bridge_path = next((item for item in bridge_candidates if item.is_file()), Path())
             if bridge_path.is_file():
                 agent_source = (
                     bridge_path.read_text(encoding="utf-8")
@@ -348,14 +609,7 @@ def reader_from_config(config: dict, project_root: str | Path | None = None) -> 
         return None
     root = Path(project_root or Path(__file__).resolve().parent.parent)
     adb_setting = str(settings.get("adb_path") or "").strip()
-    if adb_setting:
-        adb_path = Path(adb_setting)
-    else:
-        candidates = (
-            root / "tools" / "platform-tools" / "adb.exe",
-            root / "references" / "qq-pet-copilot" / "scrcpy-win64" / "adb.exe",
-        )
-        adb_path = next((item for item in candidates if item.is_file()), Path())
+    adb_path = discover_adb_path(root, adb_setting)
     key = (
         str(root),
         str(settings.get("endpoint", "127.0.0.1:27042")),

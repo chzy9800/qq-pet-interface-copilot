@@ -415,7 +415,12 @@ class NapCatClient:
         self.last_values_source = "desktop"
 
     def _http_transport(self, command: str, data_hex: str) -> dict:
-        return self._onebot_action("send_packet", {"cmd": command, "data": data_hex})
+        # NapCat 4.18.x does not reliably materialize the schema's default for
+        # `rsp`.  When it is omitted, SendPacket treats it as false and returns
+        # status=ok with an empty payload without waiting for the server reply.
+        return self._onebot_action(
+            "send_packet", {"cmd": command, "data": data_hex, "rsp": True}
+        )
 
     def _onebot_action(self, action: str, params: dict | None = None) -> dict:
         body = json.dumps(params or {}).encode("utf-8")
@@ -615,7 +620,11 @@ class NapCatClient:
         error_code = first_varint(outer, 3)
         response_body = first_bytes(outer, 4)
         if error_code != 0:
-            raise QQPetError(f"{command_name} OIDB errorCode={error_code}")
+            detail = first_string(outer, 5).strip()
+            suffix = f"：{detail}" if detail else ""
+            raise QQPetError(
+                f"{command_name} OIDB errorCode={error_code}{suffix}"
+            )
         return OidbResponse(command, sub_command, error_code, response_body, raw)
 
     def send_oidb_read(

@@ -37,6 +37,49 @@ def oidb_response(command: int, sub: int, body: bytes) -> dict:
 
 
 class ProtoAndClientTests(unittest.TestCase):
+    def test_http_packet_transport_explicitly_waits_for_response(self) -> None:
+        client = NapCatClient("http://unused", "token", "pet")
+        calls = []
+
+        def action(name: str, params=None):
+            calls.append((name, params))
+            return {"status": "ok", "retcode": 0, "data": "00"}
+
+        client._onebot_action = action  # type: ignore[method-assign]
+        client._http_transport("OidbSvcTrpcTcp.0x96f2_1", "abcd")
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "send_packet",
+                    {
+                        "cmd": "OidbSvcTrpcTcp.0x96f2_1",
+                        "data": "abcd",
+                        "rsp": True,
+                    },
+                )
+            ],
+        )
+
+    def test_oidb_server_error_includes_returned_detail(self) -> None:
+        raw = (
+            field_varint(1, 38642)
+            + field_varint(2, 1)
+            + field_varint(3, 319)
+            + field_bytes(4, b"")
+            + field_string(5, "[oidb] rule type not match appid")
+        )
+        client = NapCatClient(
+            "http://unused",
+            "token",
+            "pet",
+            transport=lambda *_: {"status": "ok", "retcode": 0, "data": raw.hex()},
+        )
+        with self.assertRaisesRegex(
+            QQPetError, "errorCode=319.*rule type not match appid"
+        ):
+            client.send_oidb("OidbSvcTrpcTcp.0x96f2_1", 38642, 1, b"")
+
     def test_read_only_oidb_retries_empty_response_without_retrying_forever(self) -> None:
         calls = 0
 

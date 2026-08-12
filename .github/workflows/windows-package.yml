@@ -19,7 +19,10 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install packager
-        run: python -m pip install --disable-pip-version-check pyinstaller==6.15.0 onepush
+        run: >-
+          python -m pip install --disable-pip-version-check
+          pyinstaller==6.15.0 onepush
+          frida==17.16.4 frida-tools==14.10.4
       - name: Run tests
         run: python -m unittest discover -s tests -v
       - name: Build executable
