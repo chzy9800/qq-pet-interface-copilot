@@ -9,10 +9,19 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from qqpet_app import __version__
 from qqpet_app.bootstrap import ensure_vc_runtime
 from qqpet_app.config import ConfigStore
 from qqpet_app.mobile_protocol import reader_from_config
 from qqpet_app.scheduler import Scheduler
+from qqpet_app.updater import (
+    UpdateInfo,
+    download_update,
+    extract_executable,
+    fetch_latest,
+    is_newer,
+    schedule_windows_install,
+)
 
 
 ROOT = (
@@ -85,6 +94,12 @@ class Launcher(tk.Tk):
         self.connect_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
         self.install_button = ttk.Button(actions, text="检查手机协议环境", command=self.install_mobile_runtime)
         self.install_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
+        self.update_button = ttk.Button(
+            body,
+            text=f"检查更新（当前 v{__version__}）",
+            command=self.check_update,
+        )
+        self.update_button.pack(fill=tk.X, pady=(10, 0))
 
     def _append(self, message: str) -> None:
         self.log.configure(state=tk.NORMAL)
@@ -106,6 +121,37 @@ class Launcher(tk.Tk):
 
     def install_mobile_runtime(self) -> None:
         self._run(self._install_worker)
+
+    def check_update(self) -> None:
+        if self.running:
+            return
+        self.update_button.configure(state=tk.DISABLED, text="正在检查更新……")
+
+        def worker() -> None:
+            try:
+                self.events.put(("update_checked", fetch_latest()))
+            except Exception as exc:
+                self.events.put(("update_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_update(self, info: UpdateInfo) -> None:
+        self.update_button.configure(state=tk.DISABLED, text=f"正在下载 {info.tag}……")
+
+        def progress(received: int, total: int) -> None:
+            percent = min(100, int(received * 100 / max(1, total)))
+            self.events.put(("update_progress", (info.tag, percent)))
+
+        def worker() -> None:
+            try:
+                update_root = DOWNLOAD_DIR.parent / "updates"
+                archive = download_update(info, update_root, progress)
+                executable = extract_executable(archive, update_root / info.tag)
+                self.events.put(("update_ready", (info, executable)))
+            except Exception as exc:
+                self.events.put(("update_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _connect_worker(self) -> None:
         try:
@@ -192,6 +238,45 @@ class Launcher(tk.Tk):
                     self.state_var.set("需要处理")
                     self._append(f"失败：{payload}")
                     messagebox.showerror("一键启动未完成", str(payload))
+                elif kind == "update_checked":
+                    info = payload
+                    self.update_button.configure(
+                        state=tk.NORMAL, text=f"检查更新（当前 v{__version__}）"
+                    )
+                    if not is_newer(info.version, __version__):
+                        messagebox.showinfo(
+                            "已经是最新版",
+                            f"当前版本 v{__version__}，GitHub 最新正式版 {info.tag}。",
+                        )
+                    elif messagebox.askyesno(
+                        "发现新版本",
+                        f"当前版本：v{__version__}\n最新版本：{info.tag}\n\n"
+                        f"{info.name}\n\n是否下载并自动更新？",
+                    ):
+                        self._download_update(info)
+                elif kind == "update_progress":
+                    tag, percent = payload
+                    self.update_button.configure(text=f"正在下载 {tag}：{percent}%")
+                elif kind == "update_ready":
+                    info, executable = payload
+                    self.update_button.configure(state=tk.NORMAL, text=f"安装 {info.tag}")
+                    if not getattr(sys, "frozen", False):
+                        messagebox.showinfo(
+                            "新版已下载",
+                            f"源码运行模式不会自动覆盖文件。新版已保存到：\n{executable}",
+                        )
+                    elif messagebox.askyesno(
+                        "安装更新",
+                        f"{info.tag} 已下载并通过 SHA-256 校验。\n\n"
+                        "现在退出助手、安装并自动重新打开吗？",
+                    ):
+                        schedule_windows_install(executable)
+                        self.destroy()
+                elif kind == "update_error":
+                    self.update_button.configure(
+                        state=tk.NORMAL, text=f"检查更新（当前 v{__version__}）"
+                    )
+                    messagebox.showerror("更新失败", str(payload))
         except queue.Empty:
             pass
         self.after(100, self._drain)

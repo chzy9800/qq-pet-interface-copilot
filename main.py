@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import os
 import random
 import sys
 import threading
@@ -16,6 +17,7 @@ from qqpet_app.client import (
     QQPetConnectionError,
     QQPetEmptyResponse,
 )
+from qqpet_app import __version__
 from qqpet_app.config import ConfigStore
 from qqpet_app.friend_visits import (
     FriendVisitProgress,
@@ -26,6 +28,14 @@ from qqpet_app.friend_pet_cache import load_latest_friend_pet_capture
 from qqpet_app.interface_tests import InterfaceTestResult, InterfaceTestRunner
 from qqpet_app.notifications import NotificationManager
 from qqpet_app.scheduler import Scheduler
+from qqpet_app.updater import (
+    UpdateInfo,
+    download_update,
+    extract_executable,
+    fetch_latest,
+    is_newer,
+    schedule_windows_install,
+)
 from qqpet_app.single_instance import SingleInstance
 
 
@@ -442,6 +452,12 @@ class MainWindow(tk.Tk):
             command=self._run_friend_visits_once,
         )
         self.friend_visit_button.pack(fill=tk.X, pady=(10, 0))
+        self.update_button = ttk.Button(
+            left,
+            text=f"检查更新（当前 v{__version__}）",
+            command=self._check_for_updates,
+        )
+        self.update_button.pack(fill=tk.X, pady=(10, 0))
 
         note = (
             "接口版不需要 scrcpy、OCR 或手机坐标。\n"
@@ -1621,6 +1637,36 @@ class MainWindow(tk.Tk):
             activity_callback=lambda text: self.events.put(("activity", text)),
         )
 
+    def _check_for_updates(self) -> None:
+        self.update_button.configure(state=tk.DISABLED, text="正在检查更新……")
+
+        def worker() -> None:
+            try:
+                info = fetch_latest()
+                self.events.put(("update_checked", info))
+            except Exception as exc:
+                self.events.put(("update_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _download_update(self, info: UpdateInfo) -> None:
+        self.update_button.configure(state=tk.DISABLED, text=f"正在下载 {info.tag}……")
+
+        def progress(received: int, total: int) -> None:
+            percent = min(100, int(received * 100 / max(1, total)))
+            self.events.put(("update_progress", (info.tag, percent)))
+
+        def worker() -> None:
+            try:
+                update_root = Path(os.environ.get("LOCALAPPDATA") or ROOT) / "QQPetInterfaceCopilot" / "updates"
+                archive = download_update(info, update_root, progress)
+                executable = extract_executable(archive, update_root / info.tag)
+                self.events.put(("update_ready", (info, executable)))
+            except Exception as exc:
+                self.events.put(("update_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _start(self) -> None:
         if self.scheduler_thread and self.scheduler_thread.is_alive():
             return
@@ -2084,10 +2130,55 @@ class MainWindow(tk.Tk):
                 if kind.endswith("_error") and kind not in {
                     "manual_pk_batch_error",
                     "interface_test_error",
+                    "update_error",
                 }:
                     self._show_notice("操作失败", str(payload), "error")
                 if kind == "log":
                     self._append_log(payload)
+                elif kind == "update_checked":
+                    info = payload
+                    self.update_button.configure(
+                        state=tk.NORMAL, text=f"检查更新（当前 v{__version__}）"
+                    )
+                    if not is_newer(info.version, __version__):
+                        self._show_notice(
+                            "已经是最新版",
+                            f"当前版本 v{__version__}，GitHub 最新正式版 {info.tag}。",
+                            "success",
+                        )
+                    elif messagebox.askyesno(
+                        "发现新版本",
+                        f"当前版本：v{__version__}\n最新版本：{info.tag}\n\n"
+                        f"{info.name}\n\n是否下载并自动更新？",
+                    ):
+                        self._download_update(info)
+                elif kind == "update_progress":
+                    tag, percent = payload
+                    self.update_button.configure(text=f"正在下载 {tag}：{percent}%")
+                elif kind == "update_ready":
+                    info, executable = payload
+                    self.update_button.configure(state=tk.NORMAL, text=f"安装 {info.tag}")
+                    if not getattr(sys, "frozen", False):
+                        self._show_notice(
+                            "新版已下载",
+                            f"源码运行模式不会自动覆盖文件。新版已保存到：{executable}",
+                            "info",
+                            12000,
+                        )
+                    elif messagebox.askyesno(
+                        "安装更新",
+                        f"{info.tag} 已下载并通过 SHA-256 校验。\n\n"
+                        "现在退出助手、安装并自动重新打开吗？",
+                    ):
+                        if self.scheduler:
+                            self.scheduler.stop()
+                        schedule_windows_install(executable)
+                        self.destroy()
+                elif kind == "update_error":
+                    self.update_button.configure(
+                        state=tk.NORMAL, text=f"检查更新（当前 v{__version__}）"
+                    )
+                    self._show_notice("更新失败", str(payload), "error", 12000)
                 elif kind == "notice":
                     title, message, level = payload
                     self._show_notice(str(title), str(message), str(level))
