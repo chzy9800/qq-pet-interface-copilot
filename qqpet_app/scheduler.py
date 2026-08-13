@@ -447,7 +447,9 @@ class Scheduler:
             return False
         self.progress.mark_story_encouraged(story_id)
         self.progress.clear_care_block(block_key)
-        detail = result.toast or "、".join(result.messages) or "服务器已确认"
+        # The server returns a pool of encouragement phrases; the official UI
+        # displays one at a time, so keep the console concise as well.
+        detail = result.toast or (result.messages[0] if result.messages else "服务器已确认")
         credit = f"，奖励积分 {result.credit}" if result.credit else ""
         self.log(f"已鼓励正在{self._action_name(kind)}的宠物{credit}：{detail}")
         self.activity(f"已鼓励宠物，正在{self._action_name(kind)}")

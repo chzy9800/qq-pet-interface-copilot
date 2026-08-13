@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 from qqpet_app.mobile_protocol import (
     MobileProtocolReader,
@@ -12,6 +13,11 @@ from qqpet_app.proto import field_bytes, field_fixed32
 
 
 class MobileProtocolTests(unittest.TestCase):
+    def test_encourage_is_open_on_mobile_one_shot_write_channel(self) -> None:
+        self.assertIn(MobileProtocolReader.STORY_ENCOURAGE, MobileProtocolReader.WRITE_ALLOWLIST)
+        hook = Path("hooks/qqpet_mobile_read_agent.js").read_text(encoding="utf-8")
+        self.assertIn("'OidbSvcTrpcTcp.0x9c44_1': '40004:1'", hook)
+
     def test_write_server_error_preserves_numeric_code(self) -> None:
         reader = MobileProtocolReader(".")
         reader._connect = lambda: None  # type: ignore[method-assign]

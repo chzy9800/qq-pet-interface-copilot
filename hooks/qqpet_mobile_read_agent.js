@@ -28,6 +28,7 @@ const ALLOWED_ONE_SHOT_WRITES = {
   'OidbSvcTrpcTcp.0x96a6_1': '38566:1',
   'OidbSvcTrpcTcp.0x985b_0': '39003:0',
   'OidbSvcTrpcTcp.0x9760_1': '38752:1',
+  'OidbSvcTrpcTcp.0x9c44_1': '40004:1',
 };
 
 function hexToBytes(hex) {

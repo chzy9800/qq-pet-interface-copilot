@@ -176,6 +176,7 @@ class MobileProtocolReader:
     REPORT_EVENT = ("OidbSvcTrpcTcp.0x96a6_1", 38566, 1)
     FRIEND_POKE = ("OidbSvcTrpcTcp.0x985b_0", 39003, 0)
     STORY_SETTLE = ("OidbSvcTrpcTcp.0x9760_1", 38752, 1)
+    STORY_ENCOURAGE = ("OidbSvcTrpcTcp.0x9c44_1", 40004, 1)
     READ_ALLOWLIST = frozenset(
         (
             STATE,
@@ -204,6 +205,7 @@ class MobileProtocolReader:
             REPORT_EVENT,
             FRIEND_POKE,
             STORY_SETTLE,
+            STORY_ENCOURAGE,
         )
     )
 
