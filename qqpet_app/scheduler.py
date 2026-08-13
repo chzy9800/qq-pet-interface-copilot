@@ -424,6 +424,35 @@ class Scheduler:
             return True
         return False
 
+    def _encourage_story_if_needed(
+        self, client: NapCatClient, config: dict, kind: str | None, story_id: str
+    ) -> bool:
+        if kind not in {"school", "work"} or not story_id:
+            return False
+        if self.progress.story_was_encouraged(story_id):
+            return True
+        block_key = f"encourage:{story_id}"
+        if self.progress.active_care_block(block_key):
+            return False
+        if self._safe_or_blocked(config, f"鼓励{self._action_name(kind)}中的宠物"):
+            return False
+        encourage = getattr(client, "encourage_story", None)
+        if not callable(encourage):
+            return False
+        try:
+            result = encourage(story_id)
+        except QQPetError as exc:
+            self.progress.set_care_block(block_key, str(exc), 60)
+            self.log(f"鼓励暂未成功：{exc}；60s 后随任务状态重试")
+            return False
+        self.progress.mark_story_encouraged(story_id)
+        self.progress.clear_care_block(block_key)
+        detail = result.toast or "、".join(result.messages) or "服务器已确认"
+        credit = f"，奖励积分 {result.credit}" if result.credit else ""
+        self.log(f"已鼓励正在{self._action_name(kind)}的宠物{credit}：{detail}")
+        self.activity(f"已鼓励宠物，正在{self._action_name(kind)}")
+        return True
+
     def _handle_story(self, client: NapCatClient, config: dict, story: StoryStatus) -> bool:
         state = self.progress.snapshot()
         pending = state.get("pending")
@@ -479,6 +508,8 @@ class Scheduler:
                 self.log(f"任务已由服务器确认，storyId={story.story_id}")
             kind = pending.get("kind") if pending else self._story_kind(story.story_id)
             action_name = self._action_name(kind)
+            if not story.finished:
+                self._encourage_story_if_needed(client, config, kind, story.story_id)
             if story.finished and config["story"]["auto_settle_when_end_time_reached"]:
                 self.activity(f"正在结算{action_name}")
                 if self._safe_or_blocked(config, "结算已完成任务"):
@@ -983,8 +1014,21 @@ class Scheduler:
                 return action
             self.progress.set_pending("school")
             course = result.course
+            if preferred_course and course.sub_event_type != preferred_course:
+                refreshed = self.config_store.data
+                refreshed["school"]["course_sub_event"] = 0
+                self.config_store.save(refreshed)
+                self.log(
+                    f"原课程 {preferred_course} 已不属于当前学习阶段，"
+                    f"已刷新并自动改选“{course.name}”"
+                )
+                preferred_course = 0
+            if result.story_id:
+                self._encourage_story_if_needed(
+                    client, config, "school", result.story_id
+                )
             response_story = f"，storyId={result.story_id}" if result.story_id else ""
-            selection = "指定" if preferred_course else "当前阶段最高收益"
+            selection = "指定" if preferred_course else "当前阶段最短时长"
             self.log(
                 f"已选择{selection}的{course.reward}课程“{course.name}”"
                 f"（{course.duration}），真实开课指令已发送{response_story}；"
@@ -1008,7 +1052,7 @@ class Scheduler:
             self.activity("正在获取开放职业和岗位")
             career_type = int(config["work"].get("career_type", 0))
             preferred_job = int(config["work"].get("job_sub_event", 0))
-            strategy = config["work"].get("strategy", "highest_total")
+            strategy = config["work"].get("strategy", "shortest_duration")
             hired_friend = self._select_work_hire(client, config)
             hired_uin = hired_friend.user_id if hired_friend else ""
             hired_pet_id = hired_friend.pet_id if hired_friend else ""
@@ -1045,8 +1089,13 @@ class Scheduler:
                         return "work_unavailable"
                     self.log(
                         f"指定岗位 {preferred_job} 当前不可用，"
-                        "已自动回退到服务器最高收益岗位"
+                        "已自动刷新并回退到服务器最短时长岗位"
                     )
+                    refreshed = self.config_store.data
+                    refreshed["work"]["career_type"] = 0
+                    refreshed["work"]["job_sub_event"] = 0
+                    refreshed["work"]["strategy"] = "shortest_duration"
+                    self.config_store.save(refreshed)
                     preferred_job = 0
             start_career = selected_job.career_type if selected_job else career_type
             start_job = selected_job.sub_event_type if selected_job else preferred_job
@@ -1103,8 +1152,10 @@ class Scheduler:
             self.progress.set_pending("work")
             self.progress.clear_care_block("work_requirements")
             job = result.job
+            if result.story_id:
+                self._encourage_story_if_needed(client, config, "work", result.story_id)
             response_story = f"，storyId={result.story_id}" if result.story_id else ""
-            selection = "指定" if preferred_job else "总收益最高"
+            selection = "指定" if preferred_job else "时长最短"
             friend_name = (
                 hired_friend.nickname or hired_friend.pet_name or hired_friend.user_id
                 if hired_friend

@@ -43,7 +43,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "attribute": "culture",
         "career_type": 0,
         "job_sub_event": 0,
-        "strategy": "highest_total",
+        "strategy": "shortest_duration",
         "times_per_day": 0,
         "employ_friend": True,
         "hire_mode": "auto",
@@ -142,6 +142,14 @@ def _merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _normalize(config: dict[str, Any]) -> dict[str, Any]:
+    # Migrate releases that only supported highest_total. The current product
+    # policy always favours more short runs over one long run.
+    if config.get("work", {}).get("strategy") == "highest_total":
+        config["work"]["strategy"] = "shortest_duration"
+    return config
+
+
 class ConfigStore:
     """config.yaml 使用 JSON 语法；JSON 本身是合法的 YAML 1.2。"""
 
@@ -165,13 +173,13 @@ class ConfigStore:
         loaded = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(loaded, dict):
             raise ValueError("config.yaml 顶层必须是对象")
-        self._config = _merge(DEFAULT_CONFIG, loaded)
+        self._config = _normalize(_merge(DEFAULT_CONFIG, loaded))
         self._validate(self._config)
         self._mtime_ns = mtime
         return True
 
     def save(self, config: dict[str, Any]) -> None:
-        merged = _merge(DEFAULT_CONFIG, config)
+        merged = _normalize(_merge(DEFAULT_CONFIG, config))
         self._validate(merged)
         temp = self.path.with_suffix(self.path.suffix + ".tmp")
         temp.write_text(json.dumps(merged, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -201,8 +209,8 @@ class ConfigStore:
             raise ValueError("work.career_type 不能小于 0")
         if int(config["work"].get("job_sub_event", 0)) < 0:
             raise ValueError("work.job_sub_event 不能小于 0")
-        if config["work"].get("strategy", "highest_total") != "highest_total":
-            raise ValueError("work.strategy 目前仅支持 highest_total")
+        if config["work"].get("strategy", "shortest_duration") != "shortest_duration":
+            raise ValueError("work.strategy 目前必须是 shortest_duration")
         if config["work"].get("hire_mode", "auto") not in {"auto", "manual"}:
             raise ValueError("work.hire_mode 必须是 auto/manual")
         hire_uin = str(config["work"].get("hire_friend_uin", "")).strip()

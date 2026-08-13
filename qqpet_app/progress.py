@@ -37,6 +37,7 @@ class DailyProgress:
                 "pending": None,
                 "care_blocks": {},
                 "settled_story_ids": [],
+                "encouraged_story_ids": [],
             }
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -50,11 +51,13 @@ class DailyProgress:
                 "pending": None,
                 "care_blocks": {},
                 "settled_story_ids": [],
+                "encouraged_story_ids": [],
             }
         loaded.setdefault("history", [])
         loaded.setdefault("pending", None)
         loaded.setdefault("care_blocks", {})
         loaded.setdefault("settled_story_ids", [])
+        loaded.setdefault("encouraged_story_ids", [])
         loaded["counts"] = {**EMPTY_COUNTS, **loaded.get("counts", {})}
         return loaded
 
@@ -84,6 +87,7 @@ class DailyProgress:
                     "pending": None,
                     "care_blocks": {},
                     "settled_story_ids": [],
+                    "encouraged_story_ids": [],
                 }
             )
             self._save()
@@ -140,6 +144,18 @@ class DailyProgress:
                 settled.append(story_id)
                 # Only today's recent IDs are needed to suppress stale status.
                 del settled[:-100]
+                self._save()
+
+    def story_was_encouraged(self, story_id: str) -> bool:
+        return story_id in self.snapshot().get("encouraged_story_ids", [])
+
+    def mark_story_encouraged(self, story_id: str) -> None:
+        with self._lock:
+            self.rollover()
+            encouraged = self._state.setdefault("encouraged_story_ids", [])
+            if story_id not in encouraged:
+                encouraged.append(story_id)
+                del encouraged[:-100]
                 self._save()
 
     def set_care_block(self, kind: str, reason: str, seconds: float) -> None:

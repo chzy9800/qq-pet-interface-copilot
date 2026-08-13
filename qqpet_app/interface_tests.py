@@ -141,7 +141,7 @@ class InterfaceTestRunner:
         result = self.client.start_work(
             career_type,
             sub_event,
-            "highest_total",
+            "shortest_duration",
             hired_user_id,
             hired_pet_id,
         )

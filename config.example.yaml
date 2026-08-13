@@ -35,7 +35,7 @@
     "attribute": "culture",
     "career_type": 0,
     "job_sub_event": 0,
-    "strategy": "highest_total",
+    "strategy": "shortest_duration",
     "times_per_day": 0,
     "employ_friend": true
   },

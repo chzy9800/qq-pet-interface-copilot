@@ -195,11 +195,11 @@ class MainWindow(tk.Tk):
         self.scheduler: Scheduler | None = None
         self.scheduler_thread: threading.Thread | None = None
         self.setting_vars: dict[str, tuple[tk.Variable, type]] = {}
-        self.course_var = tk.StringVar(value="自动选择当前属性最高收益")
-        self.course_options: dict[str, int] = {"自动选择当前属性最高收益": 0}
-        self.job_var = tk.StringVar(value="自动选择开放职业中总收益最高岗位")
+        self.course_var = tk.StringVar(value="自动选择当前属性最短时长")
+        self.course_options: dict[str, int] = {"自动选择当前属性最短时长": 0}
+        self.job_var = tk.StringVar(value="自动选择开放职业中最短时长岗位")
         self.job_options: dict[str, tuple[int, int]] = {
-            "自动选择开放职业中总收益最高岗位": (0, 0)
+            "自动选择开放职业中最短时长岗位": (0, 0)
         }
         self.adventure_var = tk.StringVar(value="自动选择服务器当前可用冒险")
         self.adventure_options: dict[str, str] = {
@@ -1278,7 +1278,7 @@ class MainWindow(tk.Tk):
             self.course_combo.configure(values=tuple(self.course_options))
             self.course_var.set(label)
         else:
-            self.course_var.set("自动选择当前属性最高收益")
+            self.course_var.set("自动选择当前属性最短时长")
         career_type = int(config["work"].get("career_type", 0))
         job_sub_event = int(config["work"].get("job_sub_event", 0))
         if job_sub_event:
@@ -1287,7 +1287,7 @@ class MainWindow(tk.Tk):
             self.job_combo.configure(values=tuple(self.job_options))
             self.job_var.set(label)
         else:
-            self.job_var.set("自动选择开放职业中总收益最高岗位")
+            self.job_var.set("自动选择开放职业中最短时长岗位")
         adventure_name = str(config["adventure"].get("option_name", ""))
         if adventure_name:
             label = f"已保存冒险“{adventure_name}”（刷新后显示详情）"
@@ -1584,7 +1584,7 @@ class MainWindow(tk.Tk):
             career_type, job_sub_event = self.job_options[selected_job]
             config["work"]["career_type"] = career_type
             config["work"]["job_sub_event"] = job_sub_event
-            config["work"]["strategy"] = "highest_total"
+            config["work"]["strategy"] = "shortest_duration"
             hire_mode = str(config["work"].get("hire_mode", "auto"))
             if config["work"].get("employ_friend") and hire_mode == "manual":
                 selected_hire = self.work_hire_friend_options.get(
@@ -2524,9 +2524,11 @@ class MainWindow(tk.Tk):
                 elif kind == "school_courses":
                     stage, courses = payload
                     previous = int(self.config_store.data["school"].get("course_sub_event", 0))
-                    options = {"自动选择当前属性最高收益": 0}
-                    selected_label = "自动选择当前属性最高收益"
+                    options = {"自动选择当前属性最短时长": 0}
+                    selected_label = "自动选择当前属性最短时长"
                     for course in courses:
+                        if not course.can_do:
+                            continue
                         label = f"{course.name}｜{course.duration}｜{course.reward}"
                         options[label] = course.sub_event_type
                         if course.sub_event_type == previous:
@@ -2562,7 +2564,7 @@ class MainWindow(tk.Tk):
                     overview, jobs = catalog.overview, catalog.jobs
                     config = self.config_store.data
                     previous = int(config["work"].get("job_sub_event", 0))
-                    automatic = "自动选择开放职业中总收益最高岗位"
+                    automatic = "自动选择开放职业中最短时长岗位"
                     options = {automatic: (0, 0)}
                     selected_label = automatic
                     for job in jobs:
@@ -2587,7 +2589,12 @@ class MainWindow(tk.Tk):
                     self.test_job_var.set(
                         next(iter(test_options), "当前没有可执行岗位")
                     )
-                    open_count = sum(1 for career in overview.careers if career.available)
+                    readable_careers = {
+                        career.career_type
+                        for career in overview.careers
+                        if career.available
+                    } | {job.career_type for job in jobs}
+                    open_count = len(readable_careers)
                     rejected_count = len(catalog.rejected_careers)
                     rejected_text = (
                         f"；{rejected_count} 个职业尚未满足参与要求，已跳过"
@@ -2596,7 +2603,7 @@ class MainWindow(tk.Tk):
                     )
                     self.job_status_label.configure(
                         text=(
-                            f"服务器开放 {open_count} 个职业；读取到 {len(test_options)} 个可执行岗位"
+                            f"服务器可读取 {open_count} 个职业；读取到 {len(test_options)} 个可执行岗位"
                             f"{rejected_text}"
                         )
                     )

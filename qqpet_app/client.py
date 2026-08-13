@@ -193,6 +193,39 @@ class StoryStatus:
         return max(0, self.duration_seconds - self.remaining_seconds)
 
 
+def duration_seconds(value: str) -> int:
+    """Convert the duration labels returned by QQ Pet into sortable seconds."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return 2**31 - 1
+    total = 0.0
+    matched = False
+    units = {
+        "天": 86400,
+        "day": 86400,
+        "小时": 3600,
+        "时": 3600,
+        "hour": 3600,
+        "分钟": 60,
+        "分": 60,
+        "minute": 60,
+        "秒": 1,
+        "second": 1,
+    }
+    for number, unit in re.findall(
+        r"(\d+(?:\.\d+)?)\s*(天|days?|小时|时|hours?|分钟|分|minutes?|秒|seconds?)",
+        text,
+    ):
+        normalized = unit.rstrip("s")
+        total += float(number) * units[normalized]
+        matched = True
+    if matched:
+        return max(0, int(total))
+    # Some server builds return a bare minute count.
+    bare = re.fullmatch(r"\d+", text)
+    return int(text) * 60 if bare else 2**31 - 1
+
+
 @dataclass(frozen=True)
 class SchoolCourse:
     name: str
@@ -207,6 +240,10 @@ class SchoolCourse:
     def reward_value(self) -> int:
         values = [int(value) for value in re.findall(r"\d+", self.reward)]
         return max(values, default=0)
+
+    @property
+    def duration_seconds(self) -> int:
+        return duration_seconds(self.duration)
 
 
 @dataclass(frozen=True)
@@ -258,6 +295,18 @@ class WorkJob:
         # amount is the final number in the string.
         values = [int(value) for value in re.findall(r"\d+", self.reward)]
         return values[-1] if values else 0
+
+    @property
+    def duration_seconds(self) -> int:
+        return duration_seconds(self.duration)
+
+
+@dataclass(frozen=True)
+class EncourageResult:
+    credit: int = 0
+    messages: tuple[str, ...] = ()
+    toast: str = ""
+    response: OidbResponse | None = None
 
 
 @dataclass(frozen=True)
@@ -385,6 +434,7 @@ class NapCatClient:
     FRIEND_VISIT_PATH = (1000, 100, 0)
     STORY_STATUS = ("OidbSvcTrpcTcp.0x975a_1", 38746, 1)
     STORY_SETTLE = ("OidbSvcTrpcTcp.0x9760_1", 38752, 1)
+    STORY_ENCOURAGE = ("OidbSvcTrpcTcp.0x9c44_1", 40004, 1)
     SCHOOL_OVERVIEW = ("OidbSvcTrpcTcp.0x9b60_1", 39776, 1)
     SCHOOL_COURSES = ("OidbSvcTrpcTcp.0x9ab2_1", 39602, 1)
     SCHOOL_START = ("OidbSvcTrpcTcp.0x975e_1", 38750, 1)
@@ -1053,11 +1103,8 @@ class NapCatClient:
                 ),
                 None,
             )
-            if selected is None:
-                raise QQPetError(
-                    f"指定课程 {preferred_sub_event} 不属于当前阶段或暂不可用"
-                )
-            return selected
+            if selected is not None:
+                return selected
         candidates = [
             course
             for course in courses
@@ -1067,7 +1114,14 @@ class NapCatClient:
         ]
         if not candidates:
             raise QQPetError(f"当前学习阶段暂无可用的{keyword}课程")
-        return max(candidates, key=lambda course: (course.reward_value, course.sub_event_type))
+        return min(
+            candidates,
+            key=lambda course: (
+                course.duration_seconds,
+                -course.reward_value,
+                course.sub_event_type,
+            ),
+        )
 
     def start_school(
         self, attribute: str, preferred_sub_event: int = 0
@@ -1164,8 +1218,6 @@ class NapCatClient:
         jobs: list[WorkJob] = []
         rejected: list[tuple[WorkCareer, str]] = []
         for career in overview.careers:
-            if not career.available:
-                continue
             try:
                 jobs.extend(self.query_work_jobs(career.career_type, hired_pet_id))
             except QQPetError as exc:
@@ -1186,15 +1238,20 @@ class NapCatClient:
         self,
         career_type: int = 0,
         preferred_sub_event: int = 0,
-        strategy: str = "highest_total",
+        strategy: str = "shortest_duration",
         hired_pet_id: str = "",
         excluded_sub_events: tuple[int, ...] = (),
     ) -> WorkJob:
-        if strategy != "highest_total":
+        if strategy not in {"shortest_duration", "highest_total"}:
             raise QQPetError(f"未知岗位选择策略：{strategy}")
         catalog = self.query_work_catalog(hired_pet_id)
         overview = catalog.overview
-        available = [career for career in overview.careers if career.available]
+        careers_with_jobs = {job.career_type for job in catalog.jobs}
+        available = [
+            career
+            for career in overview.careers
+            if career.available or career.career_type in careers_with_jobs
+        ]
         all_available = list(available)
         if career_type:
             available = [
@@ -1271,14 +1328,23 @@ class NapCatClient:
         if not jobs:
             raise QQPetError("服务器当前没有可执行的打工岗位")
 
-        # On equal total reward, keep the current career when possible.  The
-        # final key is deterministic so automatic runs do not jump careers.
-        return max(
+        if strategy == "highest_total":
+            return max(
+                jobs,
+                key=lambda job: (
+                    job.reward_value,
+                    job.career_type == overview.current_career_type,
+                    -job.career_type,
+                    job.sub_event_type,
+                ),
+            )
+        return min(
             jobs,
             key=lambda job: (
-                job.reward_value,
-                job.career_type == overview.current_career_type,
-                -job.career_type,
+                job.duration_seconds,
+                -job.reward_value,
+                job.career_type != overview.current_career_type,
+                job.career_type,
                 job.sub_event_type,
             ),
         )
@@ -1287,7 +1353,7 @@ class NapCatClient:
         self,
         career_type: int = 0,
         preferred_sub_event: int = 0,
-        strategy: str = "highest_total",
+        strategy: str = "shortest_duration",
         hired_user_id: str = "",
         hired_pet_id: str = "",
     ) -> WorkStartResult:
@@ -1536,6 +1602,25 @@ class NapCatClient:
             started_at=first_varint(detail, 4),
             recallable=bool(first_varint(detail, 5)),
             raw_body=response,
+        )
+
+    def encourage_story(self, story_id: str) -> EncourageResult:
+        story_id = str(story_id).strip()
+        if not story_id:
+            raise QQPetError("鼓励任务缺少 storyId")
+        body = field_string(1, self.pet_id) + field_string(2, story_id)
+        response = self.send_oidb(*self.STORY_ENCOURAGE, body)
+        root = parse_message(response.body)
+        messages = tuple(
+            bytes(value.value).decode("utf-8", errors="replace")
+            for value in root.get(2, [])
+            if value.wire_type == 2
+        )
+        return EncourageResult(
+            credit=first_varint(root, 1),
+            messages=messages,
+            toast=first_string(root, 3),
+            response=response,
         )
 
     def settle_story(self, story_id: str, outdoor_version: int = 2) -> OidbResponse:

@@ -650,7 +650,7 @@ class ProtoAndClientTests(unittest.TestCase):
         with self.assertRaises(QQPetError):
             client.scene_path("adventure", "coins")
 
-    def test_school_start_uses_live_stage_and_highest_attribute_reward(self) -> None:
+    def test_school_start_uses_live_stage_and_shortest_attribute_course(self) -> None:
         calls = 0
         short_course = (
             field_string(1, "体能课")
@@ -691,14 +691,14 @@ class ProtoAndClientTests(unittest.TestCase):
             self.assertEqual(first_varint(request, 1), 6100)
             self.assertEqual(first_string(request, 2), "pet")
             self.assertEqual(first_string(request, 3), "")
-            self.assertEqual(first_string(request, 6), "田径运动课")
-            self.assertEqual(first_varint(request, 7), 6115004)
+            self.assertEqual(first_string(request, 6), "体能课")
+            self.assertEqual(first_varint(request, 7), 6115001)
             self.assertEqual(first_varint(request, 100), 2)
             return oidb_response(38750, 1, field_string(1, "6100_created"))
 
         client = NapCatClient("http://unused", "token", "pet", transport=transport)
         result = client.start_school("physical")
-        self.assertEqual(result.course.name, "田径运动课")
+        self.assertEqual(result.course.name, "体能课")
         self.assertEqual(result.story_id, "6100_created")
 
     def test_school_course_can_be_selected_by_frontend_id(self) -> None:
@@ -710,6 +710,15 @@ class ProtoAndClientTests(unittest.TestCase):
         client.query_school_courses = lambda _stage=None: courses
         selected = client.select_school_course("culture", 6115002)
         self.assertEqual(selected.name, "看图识世界课")
+
+    def test_stale_school_course_falls_back_after_stage_upgrade(self) -> None:
+        client = NapCatClient("http://unused", "token", "pet")
+        client.query_school_courses = lambda _stage=None: (  # type: ignore[method-assign]
+            SchoolCourse("二年级体能课", 6125001, "力量+10", "10分钟", can_do=True),
+            SchoolCourse("二年级田径课", 6125004, "力量+25", "30分钟", can_do=True),
+        )
+        selected = client.select_school_course("physical", 6115004)
+        self.assertEqual(selected.sub_event_type, 6125001)
 
     def test_work_start_uses_live_career_jobs_and_real_begin_packet(self) -> None:
         calls = 0
@@ -766,16 +775,53 @@ class ProtoAndClientTests(unittest.TestCase):
             self.assertEqual(first_varint(request, 1), 6400)
             self.assertEqual(first_string(request, 2), "pet")
             self.assertEqual(first_string(request, 3), "")
-            self.assertEqual(first_string(request, 6), "熬夜赶参赛稿")
-            self.assertEqual(first_varint(request, 7), 6411004)
+            self.assertEqual(first_string(request, 6), "帮店主补招牌")
+            self.assertEqual(first_varint(request, 7), 6411001)
             self.assertEqual(first_varint(request, 100), 2)
             return oidb_response(38750, 1, field_string(1, "6400_created"))
 
         client = NapCatClient("http://unused", "token", "pet", transport=transport)
         result = client.start_work(career_type=1)
-        self.assertEqual(result.job.name, "熬夜赶参赛稿")
-        self.assertEqual(result.job.reward_value, 539)
+        self.assertEqual(result.job.name, "帮店主补招牌")
+        self.assertEqual(result.job.reward_value, 65)
         self.assertEqual(result.story_id, "6400_created")
+
+    def test_work_catalog_probes_partially_unlocked_career_records(self) -> None:
+        client = NapCatClient("http://unused", "token", "pet")
+        client.query_work_overview = lambda: WorkOverview(  # type: ignore[method-assign]
+            careers=(
+                WorkCareer(1, "显示为未解锁但可读取", available=False, status_code=3),
+                WorkCareer(2, "确实未解锁", available=False, status_code=3),
+            )
+        )
+
+        def jobs(career_type: int, _hired_pet_id: str = ""):
+            if career_type == 2:
+                raise MobileProtocolServerError(14561, "你的宠物还未达到该职业参与要求")
+            return (
+                WorkJob(1, "基础职业", "十分钟岗位", 6411001, "金币 65", "10分钟", can_do=True),
+            )
+
+        client.query_work_jobs = jobs  # type: ignore[method-assign]
+        catalog = client.query_work_catalog()
+        self.assertEqual([job.name for job in catalog.jobs], ["十分钟岗位"])
+        self.assertEqual(client.select_work_job().sub_event_type, 6411001)
+
+    def test_encourage_story_uses_mobile_packet_and_parses_result(self) -> None:
+        def mobile_write(command: str, number: int, service: int, body: bytes) -> bytes:
+            self.assertEqual((command, number, service), ("OidbSvcTrpcTcp.0x9c44_1", 40004, 1))
+            request = parse_message(body)
+            self.assertEqual(first_string(request, 1), "pet")
+            self.assertEqual(first_string(request, 2), "6100_story")
+            return field_varint(1, 20) + field_string(2, "加油") + field_string(3, "鼓励成功")
+
+        client = NapCatClient(
+            "http://unused", "token", "pet", oidb_write_transport=mobile_write
+        )
+        result = client.encourage_story("6100_story")
+        self.assertEqual(result.credit, 20)
+        self.assertEqual(result.messages, ("加油",))
+        self.assertEqual(result.toast, "鼓励成功")
 
     def test_work_start_encodes_hired_friend_as_nested_user_info(self) -> None:
         def transport(command: str, data: str) -> dict:

@@ -10,6 +10,7 @@ from qqpet_app.client import (
     AdventureOption,
     AdventureStartResult,
     BathInventory,
+    EncourageResult,
     FoodInventory,
     FoodItem,
     PageRules,
@@ -934,7 +935,7 @@ class ProgressAndSchedulerTests(unittest.TestCase):
                 client_factory=lambda _config: fake,
             )
             self.assertEqual(scheduler.run_once(), "work")
-            self.assertEqual(fake.started, (0, 0, "highest_total"))
+            self.assertEqual(fake.started, (0, 0, "shortest_duration"))
             self.assertEqual(fake.assert_no_hire, ("", ""))
             self.assertEqual(scheduler.progress.snapshot()["pending"]["kind"], "work")
 
@@ -1312,6 +1313,42 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             )
             self.assertEqual(scheduler.run_once(), "wash")
             self.assertEqual(fake.selected, "2")
+
+    def test_encouragement_is_persisted_and_only_sent_once_per_story(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            store.save(config)
+
+            class FakeClient:
+                calls = 0
+
+                def encourage_story(self, story_id):
+                    self.calls += 1
+                    return EncourageResult(credit=20, toast="鼓励成功")
+
+            fake = FakeClient()
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            self.assertTrue(
+                scheduler._encourage_story_if_needed(fake, config, "school", "6100_once")
+            )
+            self.assertTrue(
+                scheduler._encourage_story_if_needed(fake, config, "school", "6100_once")
+            )
+            self.assertEqual(fake.calls, 1)
+            self.assertTrue(scheduler.progress.story_was_encouraged("6100_once"))
+
+    def test_old_highest_total_config_is_migrated_to_shortest_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "config.yaml"
+            store = ConfigStore(path)
+            old = store.data
+            old["work"]["strategy"] = "highest_total"
+            path.write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+            store.reload(force=True)
+            self.assertEqual(store.data["work"]["strategy"], "shortest_duration")
 
 
 if __name__ == "__main__":
