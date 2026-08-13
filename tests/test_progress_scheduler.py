@@ -20,6 +20,7 @@ from qqpet_app.client import (
     PKOpponent,
     PKResult,
     QQPetEmptyResponse,
+    QQPetConnectionError,
     QQPetError,
     QQFriend,
     SchoolCourse,
@@ -35,6 +36,37 @@ from qqpet_app.scheduler import Scheduler
 
 
 class ProgressAndSchedulerTests(unittest.TestCase):
+    def test_login_guard_blocks_all_pet_reads_for_wrong_account(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["account"]["uin"] = "123456"
+            store.save(config)
+
+            class WrongAccountClient:
+                queried = False
+
+                def check_connection(self):
+                    return "654321"
+
+                def query_values(self):
+                    self.queried = True
+                    raise AssertionError("账号不一致时不应读取或写入宠物接口")
+
+            fake = WrongAccountClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            sent = []
+            scheduler._send_notification_async = lambda title, content, event: sent.append(event)
+            with self.assertRaisesRegex(QQPetConnectionError, "账号不一致"):
+                scheduler.run_once()
+            self.assertFalse(fake.queried)
+            self.assertEqual(sent, ["login_guard"])
+
     def test_work_eligibility_error_falls_back_to_next_job_once(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

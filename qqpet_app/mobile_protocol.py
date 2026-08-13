@@ -548,10 +548,21 @@ class MobileProtocolReader:
             try:
                 self._connect()
                 assert self._script is not None
-                uin = str(self._script.exports_sync.get_self_uin() or "").strip()
+                exports = self._script.exports_sync
+                try:
+                    state = exports.get_login_state()
+                except AttributeError:
+                    # Compatibility with an agent loaded before login-state
+                    # detection was introduced.
+                    state = {"uin": exports.get_self_uin(), "logged_in": True}
             except Exception as exc:
                 self._disconnect()
                 raise MobileProtocolUnavailable(f"无法读取手机 QQ 登录账号：{exc}") from exc
+            if not isinstance(state, dict):
+                raise MobileProtocolUnavailable("手机 QQ 返回了无效登录状态")
+            uin = str(state.get("uin") or "").strip()
+            if state.get("logged_in") is False:
+                raise MobileProtocolUnavailable("手机 QQ 已退出登录，请在模拟器中重新登录")
             if not uin.isdigit():
                 raise MobileProtocolUnavailable("手机 QQ 尚未取得有效登录账号")
             return uin

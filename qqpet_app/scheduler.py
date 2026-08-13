@@ -62,6 +62,7 @@ class Scheduler:
         self._last_alert_at = 0.0
         self._failure_alerted = False
         self._last_friend_care_check = 0.0
+        self._login_guard_blocked = False
 
     @staticmethod
     def _make_client(config: dict) -> NapCatClient:
@@ -88,6 +89,44 @@ class Scheduler:
     def activity(self, message: str) -> None:
         if self.activity_callback:
             self.activity_callback(message)
+
+    def _verify_login_session(self, client: NapCatClient, config: dict) -> str:
+        """Block every pet request unless the configured QQ session is online."""
+        checker = getattr(client, "check_connection", None)
+        if checker is None:  # Lightweight test/dry-run clients do not own a QQ session.
+            return ""
+        try:
+            uin = str(checker() or "").strip()
+        except QQPetError as exc:
+            message = f"登录态守卫已暂停全部操作：{exc}"
+            self._notify_login_guard_once(message)
+            raise QQPetConnectionError(message) from exc
+        expected = str(config.get("account", {}).get("uin", "")).strip()
+        if expected.isdigit() and uin != expected:
+            message = "登录态守卫已暂停全部操作：模拟器当前账号与配置账号不一致"
+            self._notify_login_guard_once(message)
+            raise QQPetConnectionError(message)
+        if self._login_guard_blocked:
+            self._login_guard_blocked = False
+            self.log("登录态守卫已确认正确账号在线，恢复自动控制")
+            self._send_notification_async(
+                "QQ 宠物助手登录已恢复",
+                "模拟器 QQ 已恢复为配置账号，自动任务将从下一轮继续。",
+                "login_recovery",
+            )
+        return uin
+
+    def _notify_login_guard_once(self, message: str) -> None:
+        if self._login_guard_blocked:
+            return
+        self._login_guard_blocked = True
+        self.activity("QQ 登录异常，已暂停全部宠物操作")
+        self.log(message)
+        self._send_notification_async(
+            "QQ 宠物助手已暂停",
+            f"{message}\n请在 MuMu 模拟器中重新登录配置账号。",
+            "login_guard",
+        )
 
     @staticmethod
     def _action_name(kind: str | None) -> str:
@@ -777,6 +816,7 @@ class Scheduler:
         if self.progress.rollover():
             self.log("检测到新的一天，昨日次数已归档，今日计数清零")
         client = self.client_factory(config)
+        self._verify_login_session(client, config)
         self._scan_friends_if_due(client, config)
         values = client.query_values()
         story = client.query_story()
@@ -1279,7 +1319,7 @@ class Scheduler:
                 return False
             try:
                 client = self.client_factory(config)
-                uin = client.check_connection()
+                uin = self._verify_login_session(client, config)
             except QQPetError as exc:
                 self.log(f"自动重连尚未成功：{exc}")
                 self._record_failure(f"自动重连失败：{exc}")

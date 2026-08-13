@@ -125,6 +125,30 @@ rpc.exports = {
     });
   },
 
+  getLoginState() {
+    return new Promise((resolve, reject) => {
+      Java.perform(() => {
+        try {
+          const MobileQQ = Java.use('mqq.app.MobileQQ');
+          const runtime = MobileQQ.sMobileQQ.value.peekAppRuntime();
+          if (!runtime) throw new Error('QQ runtime is unavailable');
+          const uin = String(runtime.getCurrentAccountUin() || '');
+          let loggedIn = /^\d+$/.test(uin) && uin !== '0';
+          let source = 'account_uin';
+          try {
+            loggedIn = Boolean(runtime.isLogin());
+            source = 'runtime.isLogin';
+          } catch (_) {
+            // Older QQ builds may not expose AppRuntime.isLogin().
+          }
+          resolve({ uin: uin, logged_in: loggedIn, source: source });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+  },
+
   sendOidbRead(commandName, command, subCommand, bodyHex) {
     const expected = ALLOWED_READS[String(commandName)];
     if (expected !== String(command) + ':' + String(subCommand)) {

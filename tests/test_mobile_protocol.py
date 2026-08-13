@@ -6,6 +6,7 @@ from pathlib import Path
 from qqpet_app.mobile_protocol import (
     MobileProtocolReader,
     MobileProtocolServerError,
+    MobileProtocolUnavailable,
     frida_architecture,
     select_adb_serial,
 )
@@ -13,6 +14,22 @@ from qqpet_app.proto import field_bytes, field_fixed32
 
 
 class MobileProtocolTests(unittest.TestCase):
+    def test_logged_out_runtime_is_rejected_even_when_uin_is_cached(self) -> None:
+        reader = MobileProtocolReader(".")
+        reader._connect = lambda: None  # type: ignore[method-assign]
+
+        class Exports:
+            @staticmethod
+            def get_login_state():
+                return {"uin": "123456", "logged_in": False, "source": "runtime.isLogin"}
+
+        class Script:
+            exports_sync = Exports()
+
+        reader._script = Script()
+        with self.assertRaisesRegex(MobileProtocolUnavailable, "已退出登录"):
+            reader.get_self_uin()
+
     def test_encourage_is_open_on_mobile_one_shot_write_channel(self) -> None:
         self.assertIn(MobileProtocolReader.STORY_ENCOURAGE, MobileProtocolReader.WRITE_ALLOWLIST)
         hook = Path("hooks/qqpet_mobile_read_agent.js").read_text(encoding="utf-8")
