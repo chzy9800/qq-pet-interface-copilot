@@ -36,6 +36,48 @@ class MobileProtocolTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 135061)
         self.assertIn("职业参与要求", str(raised.exception))
 
+    def test_read_server_error_does_not_detach_live_frida_agent(self) -> None:
+        reader = MobileProtocolReader(".")
+        reader._connect = lambda: None  # type: ignore[method-assign]
+        disconnects = []
+        reader._disconnect = lambda: disconnects.append(True)  # type: ignore[method-assign]
+
+        class Exports:
+            @staticmethod
+            def send_oidb_read(*_args):
+                return {"code": 14561, "message": "你的宠物还未达到该职业参与要求"}
+
+        class Script:
+            exports_sync = Exports()
+
+        reader._script = Script()
+        with self.assertRaises(MobileProtocolServerError):
+            reader.send_oidb_read(*reader.SCENE_OPTIONS, b"")
+        self.assertEqual(disconnects, [])
+
+    def test_empty_read_retries_without_detaching_live_frida_agent(self) -> None:
+        reader = MobileProtocolReader(".")
+        reader._connect = lambda: None  # type: ignore[method-assign]
+        disconnects = []
+        reader._disconnect = lambda: disconnects.append(True)  # type: ignore[method-assign]
+
+        class Exports:
+            calls = 0
+
+            @classmethod
+            def send_oidb_read(cls, *_args):
+                cls.calls += 1
+                return {"code": 0, "data_hex": ""}
+
+        class Script:
+            exports_sync = Exports()
+
+        reader._script = Script()
+        with self.assertRaisesRegex(Exception, "手机 QQ 返回空响应"):
+            reader.send_oidb_read(*reader.STORY_STATUS, b"")
+        self.assertEqual(Exports.calls, 2)
+        self.assertEqual(disconnects, [])
+
     def test_select_adb_serial_prefers_configured_online_device(self) -> None:
         output = "List of devices attached\n127.0.0.1:16384\tdevice\nemulator-5554\tdevice\n"
         self.assertEqual(select_adb_serial(output, "emulator-5554"), "emulator-5554")

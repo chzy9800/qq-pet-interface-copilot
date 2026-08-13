@@ -225,6 +225,10 @@ class MobileProtocolReader:
         self._lock = threading.RLock()
         self._session: Any = None
         self._script: Any = None
+        # Frida 17.x on Android x86_64 can crash the target while unloading
+        # frida-agent. Keep failed live sessions referenced instead of calling
+        # script.unload()/session.detach() inside a running QQ process.
+        self._retired_connections: list[tuple[Any, Any]] = []
 
     def _load_frida(self):
         try:
@@ -393,16 +397,15 @@ class MobileProtocolReader:
         script, session = self._script, self._session
         self._script = None
         self._session = None
+        if script is None and session is None:
+            return
         try:
-            if script is not None:
-                script.unload()
+            detached = session is None or bool(session.is_detached)
         except Exception:
-            pass
-        try:
-            if session is not None:
-                session.detach()
-        except Exception:
-            pass
+            detached = True
+        if not detached:
+            self._retired_connections.append((script, session))
+            del self._retired_connections[:-4]
 
     def _connect(self) -> None:
         if self._script is not None:
@@ -487,17 +490,22 @@ class MobileProtocolReader:
                     result = self._script.exports_sync.send_oidb_read(
                         spec[0], spec[1], spec[2], body.hex()
                     )
-                    code = int(result.get("code", -1))
-                    raw = bytes.fromhex(str(result.get("data_hex") or ""))
-                    if code != 0:
-                        detail = str(result.get("message") or "")
-                        raise MobileProtocolServerError(code, detail)
-                    if not raw:
-                        raise MobileProtocolUnavailable("手机 QQ 返回空响应")
-                    return raw
                 except Exception as exc:
                     last_error = exc
                     self._disconnect()
+                    continue
+                code = int(result.get("code", -1))
+                if code != 0:
+                    # This is a valid server reply, not a broken Frida session.
+                    # Detaching here used to crash QQ on MuMu x86_64.
+                    detail = str(result.get("message") or "")
+                    raise MobileProtocolServerError(code, detail)
+                raw = bytes.fromhex(str(result.get("data_hex") or ""))
+                if raw:
+                    return raw
+                # An empty OIDB body is also a business-level outcome. Retry
+                # the harmless read on the same agent without unloading it.
+                last_error = MobileProtocolUnavailable("手机 QQ 返回空响应")
             if isinstance(last_error, MobileProtocolUnavailable):
                 raise last_error
             raise MobileProtocolUnavailable(f"手机协议读取失败：{last_error}")
