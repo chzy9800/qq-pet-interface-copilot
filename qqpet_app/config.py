@@ -33,6 +33,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "interval_seconds": 15,
         "coin_threshold": 500,
     },
+    "optimization": {
+        "enabled": True,
+        "daily_active_minutes": 1440,
+        "safety_floor": 200,
+        "preserve_opening_gold": True,
+        "course_hunger_cost": 10,
+        "course_clean_cost": 4,
+        "work_hunger_cost": 4,
+        "work_clean_cost": 2,
+        "biscuit_price": 5,
+        "biscuit_restore": 10,
+        "soap_price": 2,
+        "soap_restore": 10,
+    },
     "school": {
         "enabled": True,
         "attribute": "physical",
@@ -199,6 +213,20 @@ class ConfigStore:
         maximum = float(config["mobile_protocol"]["reconnect_max_seconds"])
         if initial <= 0 or maximum < initial:
             raise ValueError("自动重连间隔必须大于 0，且最大间隔不能小于初始间隔")
+        optimization = config["optimization"]
+        if not 1 <= int(optimization["daily_active_minutes"]) <= 1440:
+            raise ValueError("optimization.daily_active_minutes 必须在 1 到 1440 之间")
+        if float(optimization["safety_floor"]) < 0:
+            raise ValueError("optimization.safety_floor 不能小于 0")
+        for key in (
+            "course_hunger_cost", "course_clean_cost", "work_hunger_cost",
+            "work_clean_cost", "biscuit_price", "soap_price",
+        ):
+            if float(optimization[key]) < 0:
+                raise ValueError(f"optimization.{key} 不能小于 0")
+        for key in ("biscuit_restore", "soap_restore"):
+            if float(optimization[key]) <= 0:
+                raise ValueError(f"optimization.{key} 必须大于 0")
         if config["school"]["attribute"] not in {"culture", "physical", "art"}:
             raise ValueError("school.attribute 必须是 culture/physical/art")
         if int(config["school"].get("course_sub_event", 0)) < 0:

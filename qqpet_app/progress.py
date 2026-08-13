@@ -38,6 +38,7 @@ class DailyProgress:
                 "care_blocks": {},
                 "settled_story_ids": [],
                 "encouraged_story_ids": [],
+                "optimizer": {"active_minutes": 0, "opening_gold": None},
             }
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -52,12 +53,14 @@ class DailyProgress:
                 "care_blocks": {},
                 "settled_story_ids": [],
                 "encouraged_story_ids": [],
+                "optimizer": {"active_minutes": 0, "opening_gold": None},
             }
         loaded.setdefault("history", [])
         loaded.setdefault("pending", None)
         loaded.setdefault("care_blocks", {})
         loaded.setdefault("settled_story_ids", [])
         loaded.setdefault("encouraged_story_ids", [])
+        loaded.setdefault("optimizer", {"active_minutes": 0, "opening_gold": None})
         loaded["counts"] = {**EMPTY_COUNTS, **loaded.get("counts", {})}
         return loaded
 
@@ -88,6 +91,7 @@ class DailyProgress:
                     "care_blocks": {},
                     "settled_story_ids": [],
                     "encouraged_story_ids": [],
+                    "optimizer": {"active_minutes": 0, "opening_gold": None},
                 }
             )
             self._save()
@@ -108,13 +112,44 @@ class DailyProgress:
             self._save()
             return self._state["counts"][kind]
 
-    def set_pending(self, kind: str, confirmed: bool = False, story_id: str = "") -> None:
+    def optimizer_state(self, current_gold: float) -> dict[str, Any]:
+        """Return today's persisted optimization inputs."""
+        with self._lock:
+            self.rollover()
+            optimizer = self._state.setdefault(
+                "optimizer", {"active_minutes": 0, "opening_gold": None}
+            )
+            if optimizer.get("opening_gold") is None:
+                optimizer["opening_gold"] = float(current_gold)
+                self._save()
+            return copy.deepcopy(optimizer)
+
+    def record_activity_minutes(self, kind: str, minutes: int) -> int:
+        if kind not in {"school", "work"} or minutes <= 0:
+            return int(self.snapshot().get("optimizer", {}).get("active_minutes", 0))
+        with self._lock:
+            self.rollover()
+            optimizer = self._state.setdefault(
+                "optimizer", {"active_minutes": 0, "opening_gold": None}
+            )
+            optimizer["active_minutes"] = int(optimizer.get("active_minutes", 0)) + int(minutes)
+            self._save()
+            return int(optimizer["active_minutes"])
+
+    def set_pending(
+        self,
+        kind: str,
+        confirmed: bool = False,
+        story_id: str = "",
+        **details: Any,
+    ) -> None:
         with self._lock:
             self._state["pending"] = {
                 "kind": kind,
                 "created_at": datetime.now().astimezone().isoformat(),
                 "confirmed": confirmed,
                 "story_id": story_id,
+                **details,
             }
             self._save()
 

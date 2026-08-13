@@ -9,7 +9,7 @@ import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from typing import Any
 
 from qqpet_app.client import (
@@ -19,6 +19,7 @@ from qqpet_app.client import (
 )
 from qqpet_app import __version__
 from qqpet_app.config import ConfigStore
+from qqpet_app.diagnostics import create_diagnostic_bundle
 from qqpet_app.friend_visits import (
     FriendVisitProgress,
     current_pet_friends,
@@ -62,6 +63,18 @@ SETTING_FIELDS = [
     ("account.pet_id", "宠物 ID", str),
     ("scheduler.interval_seconds", "轮询间隔（秒）", int),
     ("scheduler.coin_threshold", "学习金币阈值", float),
+    ("optimization.enabled", "启用动态收益优化调度", bool),
+    ("optimization.daily_active_minutes", "每日学习+打工规划分钟数", int),
+    ("optimization.safety_floor", "规划期末金币安全线", float),
+    ("optimization.preserve_opening_gold", "期末补回当天开始金币", bool),
+    ("optimization.course_hunger_cost", "每次学习消耗体力", float),
+    ("optimization.course_clean_cost", "每次学习消耗清洁", float),
+    ("optimization.work_hunger_cost", "每次打工消耗体力", float),
+    ("optimization.work_clean_cost", "每次打工消耗清洁", float),
+    ("optimization.biscuit_price", "饼干价格", float),
+    ("optimization.biscuit_restore", "饼干恢复体力", float),
+    ("optimization.soap_price", "香皂片价格", float),
+    ("optimization.soap_restore", "香皂片恢复清洁", float),
     ("school.enabled", "启用学习", bool),
     ("school.attribute", "学习属性 culture/physical/art", str),
     ("work.enabled", "启用打工", bool),
@@ -161,6 +174,7 @@ CHOICE_FIELDS = {
 SETTING_SECTIONS = (
     ("connection", "连接与账号", ("mobile_protocol.", "account.")),
     ("scheduler", "自动调度", ("scheduler.",)),
+    ("optimization", "动态收益优化", ("optimization.",)),
     ("care", "自己的宠物照顾", ("care.",)),
     ("school", "学习", ("school.",)),
     ("work", "打工", ("work.",)),
@@ -458,6 +472,12 @@ class MainWindow(tk.Tk):
             command=self._check_for_updates,
         )
         self.update_button.pack(fill=tk.X, pady=(10, 0))
+        self.diagnostics_button = ttk.Button(
+            left,
+            text="导出脱敏诊断包",
+            command=self._export_diagnostics,
+        )
+        self.diagnostics_button.pack(fill=tk.X, pady=(10, 0))
 
         note = (
             "接口版不需要 scrcpy、OCR 或手机坐标。\n"
@@ -1649,6 +1669,34 @@ class MainWindow(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _export_diagnostics(self) -> None:
+        default_name = f"qqpet-diagnostics-{datetime.now():%Y%m%d-%H%M%S}.zip"
+        destination = filedialog.asksaveasfilename(
+            parent=self,
+            title="保存脱敏诊断包",
+            initialdir=str(Path.home() / "Desktop"),
+            initialfile=default_name,
+            defaultextension=".zip",
+            filetypes=(("ZIP 压缩包", "*.zip"),),
+        )
+        if not destination:
+            return
+        self.diagnostics_button.configure(state=tk.DISABLED, text="正在脱敏并导出……")
+
+        def worker() -> None:
+            try:
+                output = create_diagnostic_bundle(
+                    ROOT,
+                    self.config_store.data,
+                    destination,
+                    log_dir=LOG_DIR,
+                )
+                self.events.put(("diagnostics_done", str(output)))
+            except Exception as exc:
+                self.events.put(("diagnostics_error", str(exc)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _download_update(self, info: UpdateInfo) -> None:
         self.update_button.configure(state=tk.DISABLED, text=f"正在下载 {info.tag}……")
 
@@ -2131,6 +2179,7 @@ class MainWindow(tk.Tk):
                     "manual_pk_batch_error",
                     "interface_test_error",
                     "update_error",
+                    "diagnostics_error",
                 }:
                     self._show_notice("操作失败", str(payload), "error")
                 if kind == "log":
@@ -2179,6 +2228,21 @@ class MainWindow(tk.Tk):
                         state=tk.NORMAL, text=f"检查更新（当前 v{__version__}）"
                     )
                     self._show_notice("更新失败", str(payload), "error", 12000)
+                elif kind == "diagnostics_done":
+                    self.diagnostics_button.configure(
+                        state=tk.NORMAL, text="导出脱敏诊断包"
+                    )
+                    self._show_notice(
+                        "诊断包已保存",
+                        f"已保存到：{payload}\n请检查后再自行发送，程序没有自动上传。",
+                        "success",
+                        12000,
+                    )
+                elif kind == "diagnostics_error":
+                    self.diagnostics_button.configure(
+                        state=tk.NORMAL, text="导出脱敏诊断包"
+                    )
+                    self._show_notice("诊断包导出失败", str(payload), "error", 12000)
                 elif kind == "notice":
                     title, message, level = payload
                     self._show_notice(str(title), str(message), str(level))

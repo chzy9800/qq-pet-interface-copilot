@@ -29,6 +29,7 @@ from .pk_progress import PKProgress
 from .progress import DailyProgress
 from .notifications import NotificationManager
 from .mobile_protocol import reader_from_config
+from .optimizer import AdaptiveDecision, choose_adaptive_plan
 
 
 LogCallback = Callable[[str], None]
@@ -445,6 +446,42 @@ class Scheduler:
             return "work" if self._under_limit(config, counts, "work") else None
         return "work" if self._under_limit(config, counts, "work") else None
 
+    def _adaptive_decision(
+        self, client: NapCatClient, config: dict, values: PetValues
+    ) -> AdaptiveDecision | None:
+        settings = config.get("optimization", {})
+        if not settings.get("enabled", False):
+            return None
+        courses = ()
+        jobs = ()
+        counts = self.progress.snapshot()["counts"]
+        if self._under_limit(config, counts, "school"):
+            courses = client.query_school_courses()
+        if self._under_limit(config, counts, "work"):
+            jobs = client.query_work_catalog().jobs
+        state = self.progress.optimizer_state(values.gold)
+        decision = choose_adaptive_plan(
+            courses=courses,
+            jobs=jobs,
+            attribute=str(config["school"].get("attribute", "physical")),
+            current_gold=values.gold,
+            opening_gold=float(state.get("opening_gold", values.gold)),
+            active_minutes=int(state.get("active_minutes", 0)),
+            daily_active_minutes=int(settings.get("daily_active_minutes", 1440)),
+            safety_floor=float(settings.get("safety_floor", 200)),
+            preserve_opening_gold=bool(settings.get("preserve_opening_gold", True)),
+            course_hunger_cost=float(settings.get("course_hunger_cost", 10)),
+            course_clean_cost=float(settings.get("course_clean_cost", 4)),
+            work_hunger_cost=float(settings.get("work_hunger_cost", 4)),
+            work_clean_cost=float(settings.get("work_clean_cost", 2)),
+            biscuit_price=float(settings.get("biscuit_price", 5)),
+            biscuit_restore=float(settings.get("biscuit_restore", 10)),
+            soap_price=float(settings.get("soap_price", 2)),
+            soap_restore=float(settings.get("soap_restore", 10)),
+        )
+        self.log(decision.explanation)
+        return decision
+
     @staticmethod
     def _under_limit(config: dict, counts: dict, kind: str) -> bool:
         if not config[kind]["enabled"]:
@@ -557,6 +594,12 @@ class Scheduler:
                     return True
                 settled = self._settle_and_verify(client, config, story)
                 if settled and pending:
+                    if pending["kind"] in {"school", "work"}:
+                        minutes = max(1, (int(story.duration_seconds) + 59) // 60)
+                        active = self.progress.record_activity_minutes(
+                            pending["kind"], minutes
+                        )
+                        self.log(f"优化器已记录本次 {minutes} 分钟；今日累计 {active} 分钟")
                     self.progress.increment(pending["kind"])
                     self.progress.clear_pending()
                     self.log(f"{pending['kind']} 已结算、服务器验证通过并计数")
@@ -575,6 +618,11 @@ class Scheduler:
             created = datetime.fromisoformat(pending["created_at"])
             age = (datetime.now().astimezone() - created).total_seconds()
             if pending.get("confirmed"):
+                duration_minutes = int(pending.get("duration_minutes", 0) or 0)
+                if pending["kind"] in {"school", "work"} and duration_minutes > 0:
+                    self.progress.record_activity_minutes(
+                        pending["kind"], duration_minutes
+                    )
                 self.progress.increment(pending["kind"])
                 self.progress.clear_pending()
                 self.log(f"检测到任务已离开进行中状态，补记 {pending['kind']} 1 次")
@@ -1029,6 +1077,19 @@ class Scheduler:
             return "story"
 
         action = self.decide(config, values)
+        adaptive: AdaptiveDecision | None = None
+        # Adventure keeps its configured priority. School/work are selected by
+        # the resource-aware planner whenever optimization is enabled.
+        if action != "adventure" and config.get("optimization", {}).get("enabled", False):
+            try:
+                adaptive = self._adaptive_decision(client, config, values)
+                action = (
+                    "school" if adaptive.action == "study"
+                    else "work" if adaptive.action == "work"
+                    else None
+                )
+            except (QQPetError, ValueError, RuntimeError, AttributeError) as exc:
+                self.log(f"动态优化目录读取失败，保留原调度逻辑：{exc}")
         if not action:
             self.activity("空闲：今日任务已完成")
             self.log("今日已没有符合限制的任务")
@@ -1041,7 +1102,11 @@ class Scheduler:
         option = config[action].get("attribute") or config[action].get("option")
         if action == "school":
             self.activity("正在获取当前阶段课程")
-            preferred_course = int(config["school"].get("course_sub_event", 0))
+            preferred_course = (
+                adaptive.course_sub_event
+                if adaptive and adaptive.course_sub_event
+                else int(config["school"].get("course_sub_event", 0))
+            )
             try:
                 result = client.start_school(option, preferred_course)
             except (QQPetEmptyResponse, QQPetConnectionError) as exc:
@@ -1054,8 +1119,12 @@ class Scheduler:
                 )
                 self.activity("开课结果待确认，正在等待服务器状态")
                 return action
-            self.progress.set_pending("school")
             course = result.course
+            self.progress.set_pending(
+                "school",
+                duration_minutes=max(1, (course.duration_seconds + 59) // 60),
+                activity_name=course.name,
+            )
             if preferred_course and course.sub_event_type != preferred_course:
                 refreshed = self.config_store.data
                 refreshed["school"]["course_sub_event"] = 0
@@ -1092,8 +1161,16 @@ class Scheduler:
                 self.activity("等待宠物满足打工职业要求")
                 return "work_blocked"
             self.activity("正在获取开放职业和岗位")
-            career_type = int(config["work"].get("career_type", 0))
-            preferred_job = int(config["work"].get("job_sub_event", 0))
+            career_type = (
+                adaptive.career_type
+                if adaptive and adaptive.career_type
+                else int(config["work"].get("career_type", 0))
+            )
+            preferred_job = (
+                adaptive.job_sub_event
+                if adaptive and adaptive.job_sub_event
+                else int(config["work"].get("job_sub_event", 0))
+            )
             strategy = config["work"].get("strategy", "shortest_duration")
             hired_friend = self._select_work_hire(client, config)
             hired_uin = hired_friend.user_id if hired_friend else ""
@@ -1191,9 +1268,13 @@ class Scheduler:
                 )
                 self.activity("开工结果待确认，正在等待服务器状态")
                 return action
-            self.progress.set_pending("work")
-            self.progress.clear_care_block("work_requirements")
             job = result.job
+            self.progress.set_pending(
+                "work",
+                duration_minutes=max(1, (job.duration_seconds + 59) // 60),
+                activity_name=job.name,
+            )
+            self.progress.clear_care_block("work_requirements")
             if result.story_id:
                 self._encourage_story_if_needed(client, config, "work", result.story_id)
             response_story = f"，storyId={result.story_id}" if result.story_id else ""
