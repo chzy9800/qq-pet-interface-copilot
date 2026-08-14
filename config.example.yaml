@@ -28,7 +28,9 @@
   "school": {
     "enabled": true,
     "attribute": "physical",
-    "course_sub_event": 0
+    "course_sub_event": 0,
+    "limit_enabled": false,
+    "times_per_day": 20
   },
   "work": {
     "enabled": true,
@@ -36,7 +38,8 @@
     "career_type": 0,
     "job_sub_event": 0,
     "strategy": "shortest_duration",
-    "times_per_day": 0,
+    "limit_enabled": false,
+    "times_per_day": 20,
     "employ_friend": true
   },
   "adventure": {

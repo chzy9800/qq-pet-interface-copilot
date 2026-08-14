@@ -512,10 +512,10 @@ class Scheduler:
     def _under_limit(config: dict, counts: dict, kind: str) -> bool:
         if not config[kind]["enabled"]:
             return False
-        if kind == "school":
+        if not config[kind].get("limit_enabled", False):
             return True
-        limit = int(config[kind]["times_per_day"])
-        return limit == 0 or counts[kind] < limit
+        limit = int(config[kind].get("times_per_day", 0))
+        return limit > 0 and counts[kind] < limit
 
     def _safe_or_blocked(self, config: dict, action: str, experimental: bool = False) -> bool:
         if config["safety"]["safe_mode"]:

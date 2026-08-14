@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import tempfile
 import unittest
 import json
@@ -30,7 +31,7 @@ from qqpet_app.client import (
     WorkEligibilityError,
     WorkStartResult,
 )
-from qqpet_app.config import ConfigStore
+from qqpet_app.config import ConfigStore, DEFAULT_CONFIG
 from qqpet_app.progress import DailyProgress
 from qqpet_app.scheduler import Scheduler
 
@@ -762,7 +763,7 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(state["counts"]["school"], 0)
             self.assertEqual(state["history"][-1]["counts"]["school"], 2)
 
-    def test_dispatch_priority_and_unlimited_school(self) -> None:
+    def test_dispatch_priority_and_configurable_daily_limits(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             store = ConfigStore(root / "config.yaml")
@@ -777,8 +778,28 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(scheduler.decide(config, poor, now), "work")
             scheduler.progress.increment("school", 11)
             self.assertEqual(scheduler.decide(config, rich, now), "school")
-            config["school"]["times_per_day"] = 1  # 兼容旧配置时也不能重新限制学习
-            self.assertEqual(scheduler.decide(config, rich, now), "school")
+            config["school"]["limit_enabled"] = True
+            config["school"]["times_per_day"] = 11
+            self.assertEqual(scheduler.decide(config, rich, now), "work")
+            config["work"]["limit_enabled"] = True
+            config["work"]["times_per_day"] = 1
+            scheduler.progress.increment("work")
+            self.assertIsNone(scheduler.decide(config, rich, now))
+
+    def test_legacy_work_limit_is_migrated_but_school_stays_unlimited(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "config.yaml"
+            legacy = copy.deepcopy(DEFAULT_CONFIG)
+            legacy["account"]["pet_id"] = "pet"
+            legacy["school"].pop("limit_enabled", None)
+            legacy["school"]["times_per_day"] = 1
+            legacy["work"].pop("limit_enabled", None)
+            legacy["work"]["times_per_day"] = 3
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            migrated = ConfigStore(path).data
+            self.assertFalse(migrated["school"]["limit_enabled"])
+            self.assertTrue(migrated["work"]["limit_enabled"])
+            self.assertEqual(migrated["work"]["times_per_day"], 3)
 
     def test_adventure_wins_after_configured_time(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
