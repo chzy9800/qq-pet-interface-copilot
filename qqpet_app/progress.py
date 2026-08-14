@@ -39,6 +39,7 @@ class DailyProgress:
                 "settled_story_ids": [],
                 "encouraged_story_ids": [],
                 "optimizer": {"active_minutes": 0, "opening_gold": None},
+                "work_hire_unavailable_uins": [],
             }
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -54,6 +55,7 @@ class DailyProgress:
                 "settled_story_ids": [],
                 "encouraged_story_ids": [],
                 "optimizer": {"active_minutes": 0, "opening_gold": None},
+                "work_hire_unavailable_uins": [],
             }
         loaded.setdefault("history", [])
         loaded.setdefault("pending", None)
@@ -61,6 +63,7 @@ class DailyProgress:
         loaded.setdefault("settled_story_ids", [])
         loaded.setdefault("encouraged_story_ids", [])
         loaded.setdefault("optimizer", {"active_minutes": 0, "opening_gold": None})
+        loaded.setdefault("work_hire_unavailable_uins", [])
         loaded["counts"] = {**EMPTY_COUNTS, **loaded.get("counts", {})}
         return loaded
 
@@ -92,6 +95,7 @@ class DailyProgress:
                     "settled_story_ids": [],
                     "encouraged_story_ids": [],
                     "optimizer": {"active_minutes": 0, "opening_gold": None},
+                    "work_hire_unavailable_uins": [],
                 }
             )
             self._save()
@@ -135,6 +139,24 @@ class DailyProgress:
             optimizer["active_minutes"] = int(optimizer.get("active_minutes", 0)) + int(minutes)
             self._save()
             return int(optimizer["active_minutes"])
+
+    def work_hire_unavailable_uins(self) -> set[str]:
+        return {
+            str(value)
+            for value in self.snapshot().get("work_hire_unavailable_uins", [])
+            if str(value)
+        }
+
+    def mark_work_hire_unavailable(self, uin: str) -> None:
+        value = str(uin).strip()
+        if not value:
+            return
+        with self._lock:
+            self.rollover()
+            blocked = self._state.setdefault("work_hire_unavailable_uins", [])
+            if value not in blocked:
+                blocked.append(value)
+                self._save()
 
     def set_pending(
         self,

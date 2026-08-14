@@ -375,11 +375,15 @@ class Scheduler:
             return None
         hire_mode = str(work.get("hire_mode", "auto"))
         own_uin = str(config.get("account", {}).get("uin", "")).strip()
+        unavailable_uins = self.progress.work_hire_unavailable_uins()
         try:
             candidates = tuple(
                 item
                 for item in client.query_pk_friend_candidates()
-                if item.user_id and item.pet_id and item.user_id != own_uin
+                if item.user_id
+                and item.pet_id
+                and item.user_id != own_uin
+                and item.user_id not in unavailable_uins
             )
         except QQPetError as exc:
             candidates = ()
@@ -388,6 +392,9 @@ class Scheduler:
         if hire_mode == "manual":
             selected_uin = str(work.get("hire_friend_uin", "")).strip()
             selected_pet_id = str(work.get("hire_friend_pet_id", "")).strip()
+            if selected_uin in unavailable_uins:
+                self.log("手动选择的雇佣好友今天已不可再雇佣，本次改为无好友打工")
+                return None
             selected = next(
                 (item for item in candidates if item.user_id == selected_uin),
                 None,
@@ -423,10 +430,29 @@ class Scheduler:
             nickname=str(pk.get("opponent_name", "")).strip(),
             power=int(pk.get("opponent_power", 0)),
         )
+        if fallback.user_id in unavailable_uins:
+            self.log("备用雇佣好友今天已不可再雇佣，本次改为无好友打工")
+            return None
         if fallback.user_id and fallback.pet_id:
             self.log("打工雇佣使用已验证的备用好友；服务器好友宠物池本轮为空")
             return fallback
         return None
+
+    @staticmethod
+    def _is_work_hire_unavailable(exc: Exception) -> bool:
+        message = str(exc)
+        return any(
+            marker in message
+            for marker in (
+                "今天很累",
+                "今日很累",
+                "无法继续被雇佣",
+                "不能继续被雇佣",
+                "今日不可雇佣",
+                "已经被雇佣过",
+                "已被雇佣过",
+            )
+        )
 
     def stop(self) -> None:
         self._stop.set()
@@ -1248,6 +1274,31 @@ class Scheduler:
                         start_career = fallback.career_type
                         start_job = fallback.sub_event_type
                         preferred_job = 0
+                    except QQPetError as exc:
+                        if not hired_uin or not self._is_work_hire_unavailable(exc):
+                            raise
+                        self.progress.mark_work_hire_unavailable(hired_uin)
+                        tired_name = (
+                            hired_friend.nickname
+                            or hired_friend.pet_name
+                            or hired_friend.user_id
+                            if hired_friend
+                            else hired_uin
+                        )
+                        self.log(
+                            f"雇佣好友 {tired_name} 今日已不可再雇佣；"
+                            "已加入今日跳过名单，正在用同一岗位无好友开工"
+                        )
+                        hired_uin = ""
+                        hired_pet_id = ""
+                        result = client.start_work(
+                            start_career,
+                            start_job,
+                            strategy,
+                            "",
+                            "",
+                        )
+                        break
             except WorkEligibilityError as exc:
                 cooldown = max(300.0, float(config["care"]["failure_cooldown_seconds"]))
                 self.progress.set_care_block(

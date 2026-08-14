@@ -34,7 +34,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "coin_threshold": 500,
     },
     "optimization": {
-        "enabled": True,
+        "enabled": False,
         "daily_active_minutes": 1440,
         "safety_floor": 200,
         "preserve_opening_gold": True,

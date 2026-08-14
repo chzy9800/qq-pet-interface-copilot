@@ -1049,6 +1049,67 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(scheduler.run_once(), "work")
             self.assertEqual(fake.started, ("10002", "pet-two"))
 
+    def test_tired_hired_friend_falls_back_to_solo_work_and_is_skipped_today(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["scheduler"]["coin_threshold"] = 500
+            config["adventure"]["enabled"] = False
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            config["work"]["employ_friend"] = True
+            store.save(config)
+
+            class FakeClient:
+                calls = []
+
+                def query_values(self):
+                    return PetValues(gold=1, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+                def query_pk_friend_candidates(self):
+                    return (
+                        PKOpponent("10001", "pet-one", nickname="好友甲", power=10),
+                        PKOpponent("10002", "pet-two", nickname="好友乙", power=20),
+                    )
+
+                def start_work(
+                    self, career_type, preferred_sub_event, strategy,
+                    hired_user_id, hired_pet_id,
+                ):
+                    self.calls.append((hired_user_id, hired_pet_id))
+                    if hired_user_id:
+                        raise QQPetError("该好友今天很累了，无法继续被雇佣")
+                    return WorkStartResult(
+                        WorkJob(
+                            1, "职业", "普通岗位", 64001,
+                            "金币 77", "10分钟", can_do=True,
+                        ),
+                        "6400_solo",
+                        hired_friend=False,
+                    )
+
+            fake = FakeClient()
+            logs = []
+            scheduler = Scheduler(
+                root / "config.yaml", root / "progress.json",
+                log=logs.append, client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "work")
+            self.assertEqual(fake.calls, [("10002", "pet-two"), ("", "")])
+            self.assertIn("10002", scheduler.progress.work_hire_unavailable_uins())
+            self.assertTrue(any("无好友开工" in line for line in logs))
+
+            selected = scheduler._select_work_hire(fake, store.data)
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected.user_id, "10001")
+
     def test_manual_work_hire_uses_configured_friend(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

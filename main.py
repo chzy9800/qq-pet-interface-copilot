@@ -63,7 +63,7 @@ SETTING_FIELDS = [
     ("account.pet_id", "宠物 ID", str),
     ("scheduler.interval_seconds", "轮询间隔（秒）", int),
     ("scheduler.coin_threshold", "学习金币阈值", float),
-    ("optimization.enabled", "启用动态收益优化调度", bool),
+    ("optimization.enabled", "测试：启用动态数学模型调度（关闭时使用原调度）", bool),
     ("optimization.daily_active_minutes", "每日学习+打工规划分钟数", int),
     ("optimization.safety_floor", "规划期末金币安全线", float),
     ("optimization.preserve_opening_gold", "期末补回当天开始金币", bool),
