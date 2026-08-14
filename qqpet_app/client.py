@@ -238,8 +238,14 @@ class SchoolCourse:
 
     @property
     def reward_value(self) -> int:
-        values = [int(value) for value in re.findall(r"\d+", self.reward)]
-        return max(values, default=0)
+        # The visible reward is followed by an mqqapi Markdown link whose
+        # percent-encoded query contains many unrelated numbers.
+        visible = str(self.reward).split("[", 1)[0]
+        match = re.search(r"(?:力量|智力|魅力)\s*\+\s*(\d+)", visible)
+        if match:
+            return int(match.group(1))
+        values = [int(value) for value in re.findall(r"\d+", visible)]
+        return values[-1] if values else 0
 
     @property
     def duration_seconds(self) -> int:
@@ -369,6 +375,7 @@ class PKResult:
     before: PetValues
     after: PetValues
     settlement: OidbResponse
+    state_verified: bool = False
 
     @property
     def gold_delta(self) -> float:
@@ -389,12 +396,15 @@ class PKResult:
     @property
     def verified(self) -> bool:
         return bool(
-            self.story_id
-            and (
+            self.state_verified
+            or (
+                self.story_id
+                and (
                 self.gold_delta != 0
                 or self.mood_delta != 0
                 or self.hunger_cost > 0
                 or self.clean_cost > 0
+                )
             )
         )
 
@@ -570,6 +580,86 @@ class NapCatClient:
         if not decoded.startswith(f"{user_id}-"):
             raise QQPetError("服务器返回的宠物 ID 与 QQ 号不匹配")
         return OwnPetProfile(user_id=user_id, pet_id=pet_id, pet_name=pet_name)
+
+    @staticmethod
+    def _decode_friend_pet_values(
+        response: bytes, expected_uin: str, expected_pet_id: str = ""
+    ) -> PetValues:
+        """Find and decode the fresh pet object returned by GetOtherUserPet.
+
+        Mobile QQ wraps ``jj5.t`` differently between gateway builds, so locate
+        the pet object by its profile and personal-value fields instead of
+        depending on a fixed outer wrapper field.
+        """
+
+        def current(display: dict, field: int) -> float:
+            return first_float(parse_message(first_bytes(display, field)), 3)
+
+        def walk(data: bytes, depth: int = 0) -> PetValues | None:
+            if depth > 5:
+                return None
+            try:
+                message = parse_message(data)
+            except (TypeError, ValueError):
+                return None
+
+            profile_raw = first_bytes(message, 4)
+            personal_raw = first_bytes(message, 5)
+            if profile_raw and personal_raw:
+                try:
+                    profile = parse_message(profile_raw)
+                    user_id = first_string(profile, 5).strip()
+                    pet_id = first_string(profile, 8).strip()
+                    personal = parse_message(personal_raw)
+                    # QQ 9.3.35 uses protobuf field 4; retain field 3 as a
+                    # compatibility fallback for older pet modules.
+                    display_raw = first_bytes(personal, 4) or first_bytes(personal, 3)
+                    display = parse_message(display_raw)
+                    hunger_raw = first_bytes(display, 2)
+                    if (
+                        display_raw
+                        and hunger_raw
+                        and (not expected_uin or user_id == str(expected_uin))
+                        and (not expected_pet_id or pet_id == str(expected_pet_id))
+                    ):
+                        return PetValues(
+                            feel=current(display, 1),
+                            hunger=current(display, 2),
+                            clean=current(display, 3),
+                            total=current(display, 4),
+                        )
+                except (TypeError, ValueError):
+                    pass
+
+            for values in message.values():
+                for value in values:
+                    if value.wire_type != 2:
+                        continue
+                    found = walk(bytes(value.value), depth + 1)
+                    if found is not None:
+                        return found
+            return None
+
+        values = walk(response)
+        if values is None:
+            raise QQPetError(
+                f"服务器好友宠物资料缺少 QQ {expected_uin} 的饥饿度字段"
+            )
+        return values
+
+    def query_friend_pet_values(
+        self, friend_uin: str, expected_pet_id: str = ""
+    ) -> PetValues:
+        """Fetch one friend's current pet values through GetOtherUserPet."""
+        target_uin = str(friend_uin).strip()
+        if not target_uin.isdigit():
+            raise QQPetError(f"好友 QQ 号无效：{friend_uin}")
+        response = self.send_oidb_read(
+            *self.FRIEND_PROFILE, field_string(1, target_uin)
+        ).body
+        return self._decode_friend_pet_values(
+            response, target_uin, str(expected_pet_id).strip()
+        )
 
     def query_pk_friend_candidates(
         self, source: int = 6, max_pages: int = 20
@@ -897,13 +987,17 @@ class NapCatClient:
             order_id=first_string(root, 2),
         )
 
-    def use_bath_item(self, item_id: str, pet_uin: str = "") -> WashResult:
+    def use_bath_item(
+        self, item_id: str, pet_uin: str = "", count: int = 1
+    ) -> WashResult:
         if item_id not in {"1", "2"}:
             raise QQPetError(f"未知洗护道具：{item_id}")
+        if not 1 <= int(count) <= 99:
+            raise QQPetError("洗护道具使用数量必须在 1 到 99 之间")
         body = (
             field_string(1, self.pet_id)
             + field_string(2, item_id)
-            + field_varint(3, 1)
+            + field_varint(3, int(count))
             + field_string(4, pet_uin)
         )
         response = self.send_oidb(*self.DO_BATH, body).body
@@ -1544,21 +1638,50 @@ class NapCatClient:
         wait_seconds: float = 9.0,
     ) -> PKResult:
         before = self.query_values()
-        started = self.start_pk(opponent_uin, opponent_pet_id)
-        time.sleep(max(8.0, float(wait_seconds)))
-        # The desktop bridge currently returns an empty status body, which is
-        # valid for this short story.  The settlement and state delta below
-        # are the authoritative success checks.
-        self.query_pk_status(started.story_id)
-        settlement = self.settle_pk(started.story_id)
-        after = self.query_values()
+        story_id = ""
+        settlement = OidbResponse(self.PK_SETTLE[1], self.PK_SETTLE[2], 0, b"", b"")
+        waited = False
+        state_verified = False
+        try:
+            started = self.start_pk(opponent_uin, opponent_pet_id)
+            story_id = started.story_id
+            time.sleep(max(8.0, float(wait_seconds)))
+            waited = True
+            # An empty status body is valid for this short story.
+            try:
+                self.query_pk_status(story_id)
+            except QQPetEmptyResponse:
+                pass
+            settlement = self.settle_pk(story_id)
+            after = self.query_values()
+        except QQPetEmptyResponse as empty_error:
+            # A mobile one-shot write can time out after the server accepted it.
+            # Never resend: verify the characteristic PK stamina+cleanliness
+            # cost from a fresh state read and record an inferred success.
+            if not waited:
+                time.sleep(max(1.0, min(3.0, float(wait_seconds))))
+            after = self.query_values()
+            state_verified = (
+                before.hunger > after.hunger
+                and before.clean > after.clean
+                and (
+                    before.gold != after.gold
+                    or before.feel != after.feel
+                    or (before.hunger - after.hunger) >= 1
+                )
+            )
+            if not state_verified:
+                raise QQPetError(
+                    "PK 写入返回空响应，复查状态也未发现 PK 消耗；结果仍不确定，禁止重发"
+                ) from empty_error
         result = PKResult(
             opponent_uin=opponent_uin,
             opponent_pet_id=opponent_pet_id,
-            story_id=started.story_id,
+            story_id=story_id,
             before=before,
             after=after,
             settlement=settlement,
+            state_verified=state_verified,
         )
         if not result.verified:
             raise QQPetError("PK 已返回结算包，但金币、心情、体力和清洁均未变化")

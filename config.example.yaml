@@ -79,10 +79,16 @@
   },
   "friend_care": {
     "enabled": false,
+    "feed_enabled": true,
+    "clean_enabled": true,
     "check_interval_seconds": 60,
     "hunger_threshold": 80,
+    "clean_threshold": 80,
+    "bath_item": "soap",
     "verify_delay_seconds": 1,
     "verify_attempts": 5,
+    "max_feeds_per_friend_per_check": 10,
+    "max_washes_per_friend_per_check": 10,
     "failure_cooldown_seconds": 600,
     "targets": []
   },

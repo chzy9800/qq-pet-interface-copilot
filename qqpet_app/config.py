@@ -105,10 +105,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "friend_care": {
         "enabled": False,
+        "feed_enabled": True,
+        "clean_enabled": True,
         "check_interval_seconds": 60,
         "hunger_threshold": 80,
+        "clean_threshold": 80,
+        "bath_item": "soap",
         "verify_delay_seconds": 1,
         "verify_attempts": 5,
+        "max_feeds_per_friend_per_check": 10,
+        "max_washes_per_friend_per_check": 10,
         "failure_cooldown_seconds": 600,
         "targets": [],
     },
@@ -321,10 +327,22 @@ class ConfigStore:
             raise ValueError("friend_care.check_interval_seconds 不能小于 15 秒")
         if not 0 <= float(config["friend_care"]["hunger_threshold"]) <= 100:
             raise ValueError("friend_care.hunger_threshold 必须在 0 到 100 之间")
+        if not 0 <= float(config["friend_care"]["clean_threshold"]) <= 100:
+            raise ValueError("friend_care.clean_threshold 必须在 0 到 100 之间")
+        if str(config["friend_care"]["bath_item"]) not in {"soap", "bath_ball"}:
+            raise ValueError("friend_care.bath_item 必须是 soap 或 bath_ball")
         if float(config["friend_care"]["verify_delay_seconds"]) < 0:
             raise ValueError("friend_care.verify_delay_seconds 不能小于 0")
         if not 1 <= int(config["friend_care"]["verify_attempts"]) <= 10:
             raise ValueError("friend_care.verify_attempts 必须在 1 到 10 之间")
+        if not 1 <= int(config["friend_care"]["max_feeds_per_friend_per_check"]) <= 20:
+            raise ValueError(
+                "friend_care.max_feeds_per_friend_per_check 必须在 1 到 20 之间"
+            )
+        if not 1 <= int(config["friend_care"]["max_washes_per_friend_per_check"]) <= 20:
+            raise ValueError(
+                "friend_care.max_washes_per_friend_per_check 必须在 1 到 20 之间"
+            )
         if float(config["friend_care"]["failure_cooldown_seconds"]) < 0:
             raise ValueError("friend_care.failure_cooldown_seconds 不能小于 0")
         targets = config["friend_care"].get("targets", [])

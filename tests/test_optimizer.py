@@ -3,17 +3,74 @@ from __future__ import annotations
 import unittest
 from fractions import Fraction
 
-from qqpet_app.client import SchoolCourse, WorkJob
+from qqpet_app.client import BathItem, SchoolCourse, WorkJob
 from qqpet_app.optimizer import (
     Activity,
     OptimizationRequest,
+    _course_coin_cost,
     choose_adaptive_plan,
+    derive_auto_optimization_inputs,
     fatigue_weighted_minutes,
     optimize_daily_plan,
 )
 
 
 class OptimizerTests(unittest.TestCase):
+    def test_live_course_text_ignores_markdown_numbers_and_current_values(self) -> None:
+        icon = "![#20px #20px](https://qqpet.gtimg.com/icon/1776409721409.png)"
+        tips = "[ ](mqqapi://markdown/node?nodeType=petTips&text=%E5%AD%A6%E4%B9%A0%97)"
+        short = SchoolCourse(
+            "舞台表演课",
+            6125003,
+            f"魅力+20{tips}",
+            "20分钟",
+            f"{icon} 70(当前{icon}2001)体力10(当前85)清洁4(当前81)",
+            can_do=True,
+        )
+        long = SchoolCourse(
+            "艺术实践课",
+            6125006,
+            f"魅力+50{tips}",
+            "1小时",
+            f"{icon} 210(当前{icon}2001)体力30(当前85)清洁12(当前81)",
+            can_do=True,
+        )
+        self.assertEqual(short.reward_value, 20)
+        self.assertEqual(long.reward_value, 50)
+        self.assertEqual(_course_coin_cost(short), 70)
+        self.assertEqual(_course_coin_cost(long), 210)
+
+    def test_auto_inputs_use_live_catalog_and_learned_food_economics(self) -> None:
+        inputs = derive_auto_optimization_inputs(
+            courses=(
+                SchoolCourse(
+                    "课程", 61001, "力量 +10", "10分钟", "20金币",
+                    "体力-6，清洁-3", True,
+                ),
+            ),
+            jobs=(
+                WorkJob(
+                    1, "职业", "岗位", 64001, "50金币", "10分钟", "",
+                    "体力-2，清洁-1", True,
+                ),
+            ),
+            bath_items=(BathItem("2", "沐浴球", 8, 25, 0),),
+            food_count=0,
+            bath_count=0,
+            preferred_bath_item_id="2",
+            learned_profile={"food": {"price": 7, "restore": 12}},
+        )
+        self.assertEqual(inputs.course_hunger_cost, 6)
+        self.assertEqual(inputs.course_clean_cost, 3)
+        self.assertEqual(inputs.work_hunger_cost, 2)
+        self.assertEqual(inputs.work_clean_cost, 1)
+        self.assertEqual(inputs.biscuit_price, 7)
+        self.assertEqual(inputs.biscuit_restore, 12)
+        self.assertEqual(inputs.soap_price, 8)
+        self.assertEqual(inputs.soap_restore, 25)
+        self.assertEqual(inputs.safety_floor, 15)
+        self.assertIn("实测已校准", inputs.summary)
+
     def test_adaptive_plan_uses_live_course_and_highest_hourly_job(self) -> None:
         courses = (
             SchoolCourse("慢课", 61001, "力量 +20", "60分钟", "70金币", can_do=True),

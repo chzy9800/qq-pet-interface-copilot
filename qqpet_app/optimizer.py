@@ -175,9 +175,43 @@ class AdaptiveDecision:
     result: OptimizationResult | None = None
 
 
+@dataclass(frozen=True)
+class AutoOptimizationInputs:
+    """Runtime values inferred from current catalogs and observations."""
+
+    daily_active_minutes: int
+    safety_floor: float
+    preserve_opening_gold: bool
+    course_hunger_cost: float
+    course_clean_cost: float
+    work_hunger_cost: float
+    work_clean_cost: float
+    biscuit_price: float
+    biscuit_restore: float
+    soap_price: float
+    soap_restore: float
+    summary: str
+
+
 def _last_number(text: str) -> float:
     values = re.findall(r"\d+(?:\.\d+)?", str(text).replace(",", ""))
     return float(values[-1]) if values else 0.0
+
+
+def _course_coin_cost(item: object) -> float:
+    """Parse the course fee without consuming URL or current-state numbers."""
+    text = str(getattr(item, "cost", ""))
+    # Server text starts with a Markdown coin icon, then 70(当前...2001),
+    # followed by hunger/clean costs and their current values.
+    visible = re.sub(r"!\[[^\]]*\]\([^)]+\)", " ", text)
+    match = re.search(r"(\d+(?:\.\d+)?)\s*(?:金币)?\s*\(\s*当前", visible)
+    if match:
+        return float(match.group(1))
+    explicit = re.search(r"(\d+(?:\.\d+)?)\s*金币", visible)
+    if explicit:
+        return float(explicit.group(1))
+    values = re.findall(r"\d+(?:\.\d+)?", visible.replace(",", ""))
+    return float(values[0]) if values else 0.0
 
 
 def _resource_cost(item: object, keyword: str, fallback: float) -> Fraction:
@@ -185,6 +219,109 @@ def _resource_cost(item: object, keyword: str, fallback: float) -> Fraction:
     text = f"{getattr(item, 'cost', '')} {getattr(item, 'description', '')}"
     match = re.search(rf"{re.escape(keyword)}\s*(?:值)?\s*[-−－:]?\s*(\d+(?:\.\d+)?)", text)
     return Fraction(match.group(1)) if match else Fraction(str(fallback))
+
+
+def _catalog_cost(
+    items: Iterable[object], keyword: str, fallback: float
+) -> tuple[float, bool]:
+    values: list[float] = []
+    for item in items:
+        text = f"{getattr(item, 'cost', '')} {getattr(item, 'description', '')}"
+        match = re.search(
+            rf"{re.escape(keyword)}\s*(?:值)?\s*[-−－:]?\s*(\d+(?:\.\d+)?)",
+            text,
+        )
+        if match:
+            values.append(float(match.group(1)))
+    if not values:
+        return float(fallback), False
+    values.sort()
+    middle = len(values) // 2
+    value = values[middle] if len(values) % 2 else (values[middle - 1] + values[middle]) / 2
+    return value, True
+
+
+def derive_auto_optimization_inputs(
+    *,
+    courses: Iterable[object],
+    jobs: Iterable[object],
+    bath_items: Iterable[object],
+    food_count: int,
+    bath_count: int,
+    preferred_bath_item_id: str,
+    learned_profile: dict[str, object] | None = None,
+) -> AutoOptimizationInputs:
+    """Infer all technical optimizer inputs; users only choose whether to enable it."""
+
+    courses = tuple(courses)
+    jobs = tuple(jobs)
+    bath_items = tuple(bath_items)
+    profile = learned_profile or {}
+    food_value = profile.get("food", {})
+    food = food_value if isinstance(food_value, dict) else {}
+    course_hunger, course_hunger_live = _catalog_cost(courses, "体力", 10)
+    course_clean, course_clean_live = _catalog_cost(courses, "清洁", 4)
+    work_hunger, work_hunger_live = _catalog_cost(jobs, "体力", 4)
+    work_clean, work_clean_live = _catalog_cost(jobs, "清洁", 2)
+
+    selected_bath = next(
+        (item for item in bath_items if str(getattr(item, "item_id", "")) == preferred_bath_item_id),
+        None,
+    )
+    if selected_bath is None:
+        usable = [item for item in bath_items if float(getattr(item, "clean_gain", 0)) > 0]
+        selected_bath = min(
+            usable,
+            key=lambda item: float(getattr(item, "gold_price", 0))
+            / max(1.0, float(getattr(item, "clean_gain", 0))),
+            default=None,
+        )
+    soap_price = float(getattr(selected_bath, "gold_price", 2) or 2)
+    soap_restore = float(getattr(selected_bath, "clean_gain", 10) or 10)
+    biscuit_price = float(food.get("price", 5) or 5)
+    biscuit_restore = float(food.get("restore", 10) or 10)
+    safety_floor = (biscuit_price if food_count <= 0 else 0) + (
+        soap_price if bath_count <= 0 else 0
+    )
+    food_source = (
+        "食物价格/恢复=实测已校准"
+        if food.get("price") and food.get("restore")
+        else "食物价格/恢复=待首次喂食自动校准"
+    )
+    activity_source = (
+        "课程/岗位消耗=服务器目录逐项解析（摘要为目录中位数）"
+        if all((course_hunger_live, course_clean_live, work_hunger_live, work_clean_live))
+        else "部分课程/岗位消耗=目录未下发，暂用保守估值"
+    )
+    bath_source = (
+        "洗护价格/恢复=服务器目录"
+        if selected_bath is not None
+        else "洗护价格/恢复=目录未下发，暂用保守估值"
+    )
+    return AutoOptimizationInputs(
+        daily_active_minutes=24 * 60,
+        safety_floor=safety_floor,
+        preserve_opening_gold=True,
+        course_hunger_cost=course_hunger,
+        course_clean_cost=course_clean,
+        work_hunger_cost=work_hunger,
+        work_clean_cost=work_clean,
+        biscuit_price=biscuit_price,
+        biscuit_restore=biscuit_restore,
+        soap_price=soap_price,
+        soap_restore=soap_restore,
+        summary=(
+            "自动测算：学习体力/清洁 "
+            f"{course_hunger:g}/{course_clean:g}，打工 {work_hunger:g}/{work_clean:g}，"
+            f"食物 {biscuit_price:g}金币/+{biscuit_restore:g}，洗护 "
+            f"{soap_price:g}金币/+{soap_restore:g}，期末自动储备 {safety_floor:g}金币；"
+            + activity_source
+            + "；"
+            + bath_source
+            + "；"
+            + food_source
+        ),
+    )
 
 
 def _fatigue_multiplier_at(active_minutes: int) -> Fraction:
@@ -264,7 +401,7 @@ def choose_adaptive_plan(
         course_minutes = max(1, math.ceil(int(getattr(course, "duration_seconds", 0)) / 60))
         if course_minutes > remaining:
             continue
-        course_cost = _last_number(str(getattr(course, "cost", "")))
+        course_cost = _course_coin_cost(course)
         course_care = (
             _resource_cost(course, "体力", course_hunger_cost) * replacement_hunger
             + _resource_cost(course, "清洁", course_clean_cost) * replacement_clean
