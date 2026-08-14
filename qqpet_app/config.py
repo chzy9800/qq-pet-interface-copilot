@@ -51,6 +51,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "attribute": "physical",
         "course_sub_event": 0,
+        "limit_enabled": False,
+        "times_per_day": 20,
     },
     "work": {
         "enabled": True,
@@ -58,7 +60,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "career_type": 0,
         "job_sub_event": 0,
         "strategy": "shortest_duration",
-        "times_per_day": 0,
+        "limit_enabled": False,
+        "times_per_day": 20,
         "employ_friend": True,
         "hire_mode": "auto",
         "hire_friend_uin": "",
@@ -105,6 +108,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "check_interval_seconds": 60,
         "hunger_threshold": 80,
         "verify_delay_seconds": 1,
+        "verify_attempts": 5,
         "failure_cooldown_seconds": 600,
         "targets": [],
     },
@@ -164,6 +168,22 @@ def _normalize(config: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+def _migrate_loaded(config: dict[str, Any]) -> dict[str, Any]:
+    """Preserve legacy daily-limit behavior before defaults are merged."""
+    migrated = copy.deepcopy(config)
+    school = migrated.get("school")
+    if isinstance(school, dict) and "limit_enabled" not in school:
+        # Older releases deliberately ignored school.times_per_day. Keep those
+        # users unlimited until they explicitly enable the new switch.
+        school["limit_enabled"] = False
+    work = migrated.get("work")
+    if isinstance(work, dict) and "limit_enabled" not in work:
+        # Work used 0=unlimited and a positive number=limited before the UI had
+        # an explicit switch, so retain that behavior during upgrade.
+        work["limit_enabled"] = int(work.get("times_per_day", 0) or 0) > 0
+    return migrated
+
+
 class ConfigStore:
     """config.yaml 使用 JSON 语法；JSON 本身是合法的 YAML 1.2。"""
 
@@ -187,7 +207,7 @@ class ConfigStore:
         loaded = json.loads(self.path.read_text(encoding="utf-8"))
         if not isinstance(loaded, dict):
             raise ValueError("config.yaml 顶层必须是对象")
-        self._config = _normalize(_merge(DEFAULT_CONFIG, loaded))
+        self._config = _normalize(_merge(DEFAULT_CONFIG, _migrate_loaded(loaded)))
         self._validate(self._config)
         self._mtime_ns = mtime
         return True
@@ -231,12 +251,22 @@ class ConfigStore:
             raise ValueError("school.attribute 必须是 culture/physical/art")
         if int(config["school"].get("course_sub_event", 0)) < 0:
             raise ValueError("school.course_sub_event 不能小于 0")
+        school_limit = int(config["school"].get("times_per_day", 0))
+        if school_limit < 0:
+            raise ValueError("school.times_per_day 不能小于 0")
+        if config["school"].get("limit_enabled") and school_limit <= 0:
+            raise ValueError("启用每日学习次数限制后，学习次数必须大于 0")
         if config["work"]["attribute"] not in {"culture", "physical", "art"}:
             raise ValueError("work.attribute 必须是 culture/physical/art")
         if int(config["work"].get("career_type", 0)) < 0:
             raise ValueError("work.career_type 不能小于 0")
         if int(config["work"].get("job_sub_event", 0)) < 0:
             raise ValueError("work.job_sub_event 不能小于 0")
+        work_limit = int(config["work"].get("times_per_day", 0))
+        if work_limit < 0:
+            raise ValueError("work.times_per_day 不能小于 0")
+        if config["work"].get("limit_enabled") and work_limit <= 0:
+            raise ValueError("启用每日打工次数限制后，打工次数必须大于 0")
         if config["work"].get("strategy", "shortest_duration") != "shortest_duration":
             raise ValueError("work.strategy 目前必须是 shortest_duration")
         if config["work"].get("hire_mode", "auto") not in {"auto", "manual"}:
@@ -293,6 +323,8 @@ class ConfigStore:
             raise ValueError("friend_care.hunger_threshold 必须在 0 到 100 之间")
         if float(config["friend_care"]["verify_delay_seconds"]) < 0:
             raise ValueError("friend_care.verify_delay_seconds 不能小于 0")
+        if not 1 <= int(config["friend_care"]["verify_attempts"]) <= 10:
+            raise ValueError("friend_care.verify_attempts 必须在 1 到 10 之间")
         if float(config["friend_care"]["failure_cooldown_seconds"]) < 0:
             raise ValueError("friend_care.failure_cooldown_seconds 不能小于 0")
         targets = config["friend_care"].get("targets", [])

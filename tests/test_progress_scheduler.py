@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import tempfile
 import unittest
 import json
@@ -30,7 +31,7 @@ from qqpet_app.client import (
     WorkEligibilityError,
     WorkStartResult,
 )
-from qqpet_app.config import ConfigStore
+from qqpet_app.config import ConfigStore, DEFAULT_CONFIG
 from qqpet_app.progress import DailyProgress
 from qqpet_app.scheduler import Scheduler
 
@@ -293,6 +294,7 @@ class ProgressAndSchedulerTests(unittest.TestCase):
                     "check_interval_seconds": 15,
                     "hunger_threshold": 80,
                     "verify_delay_seconds": 0,
+                    "verify_attempts": 3,
                     "failure_cooldown_seconds": 600,
                     "targets": [
                         {"uin": "10001", "pet_id": "friend-pet", "name": "好友甲"}
@@ -315,10 +317,104 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             )
             self.assertEqual(
                 scheduler._run_friend_care_if_due(object(), config),
-                "friend_feed_failed",
+                "friend_feed_pending",
             )
             self.assertEqual(scheduler.progress.count("friend_feed"), 0)
             self.assertIsNotNone(scheduler.progress.active_care_block("friend_feed:10001"))
+
+    def test_friend_care_retries_fresh_state_without_resending_feed(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["friend_care"].update(
+                {
+                    "enabled": True,
+                    "check_interval_seconds": 15,
+                    "hunger_threshold": 80,
+                    "verify_delay_seconds": 0,
+                    "verify_attempts": 3,
+                    "targets": [
+                        {"uin": "10001", "pet_id": "friend-pet", "name": "好友甲"}
+                    ],
+                }
+            )
+
+            class FriendClient:
+                def __init__(self):
+                    self.reads = 0
+                    self.feed_calls = 0
+
+                def query_values(self):
+                    self.reads += 1
+                    return PetValues(hunger=90 if self.reads >= 4 else 50, clean=90)
+
+                def feed(self):
+                    self.feed_calls += 1
+
+            friend_client = FriendClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: friend_client,
+            )
+            self.assertEqual(
+                scheduler._run_friend_care_if_due(object(), config), "friend_feed"
+            )
+            self.assertEqual(friend_client.feed_calls, 1)
+            self.assertEqual(friend_client.reads, 4)
+            self.assertEqual(scheduler.progress.count("friend_feed"), 1)
+
+    def test_friend_care_accepts_inventory_decrease_when_friend_state_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["friend_care"].update(
+                {
+                    "enabled": True,
+                    "check_interval_seconds": 15,
+                    "hunger_threshold": 80,
+                    "verify_delay_seconds": 0,
+                    "verify_attempts": 2,
+                    "targets": [
+                        {"uin": "10001", "pet_id": "friend-pet", "name": "好友甲"}
+                    ],
+                }
+            )
+
+            class OwnClient:
+                def __init__(self):
+                    self.reads = 0
+
+                def query_food_inventory(self):
+                    self.reads += 1
+                    return FoodInventory(biscuits=2 if self.reads == 1 else 1)
+
+            class FriendClient:
+                def __init__(self):
+                    self.feed_calls = 0
+
+                def query_values(self):
+                    return PetValues(hunger=50, clean=90)
+
+                def feed(self):
+                    self.feed_calls += 1
+
+            own_client = OwnClient()
+            friend_client = FriendClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: friend_client,
+            )
+            self.assertEqual(
+                scheduler._run_friend_care_if_due(own_client, config), "friend_feed"
+            )
+            self.assertEqual(friend_client.feed_calls, 1)
+            self.assertEqual(scheduler.progress.count("friend_feed"), 1)
 
     def test_employed_recall_waits_for_best_split_and_counts_once(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
@@ -762,7 +858,7 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(state["counts"]["school"], 0)
             self.assertEqual(state["history"][-1]["counts"]["school"], 2)
 
-    def test_dispatch_priority_and_unlimited_school(self) -> None:
+    def test_dispatch_priority_and_configurable_daily_limits(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             store = ConfigStore(root / "config.yaml")
@@ -777,8 +873,28 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(scheduler.decide(config, poor, now), "work")
             scheduler.progress.increment("school", 11)
             self.assertEqual(scheduler.decide(config, rich, now), "school")
-            config["school"]["times_per_day"] = 1  # 兼容旧配置时也不能重新限制学习
-            self.assertEqual(scheduler.decide(config, rich, now), "school")
+            config["school"]["limit_enabled"] = True
+            config["school"]["times_per_day"] = 11
+            self.assertEqual(scheduler.decide(config, rich, now), "work")
+            config["work"]["limit_enabled"] = True
+            config["work"]["times_per_day"] = 1
+            scheduler.progress.increment("work")
+            self.assertIsNone(scheduler.decide(config, rich, now))
+
+    def test_legacy_work_limit_is_migrated_but_school_stays_unlimited(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "config.yaml"
+            legacy = copy.deepcopy(DEFAULT_CONFIG)
+            legacy["account"]["pet_id"] = "pet"
+            legacy["school"].pop("limit_enabled", None)
+            legacy["school"]["times_per_day"] = 1
+            legacy["work"].pop("limit_enabled", None)
+            legacy["work"]["times_per_day"] = 3
+            path.write_text(json.dumps(legacy), encoding="utf-8")
+            migrated = ConfigStore(path).data
+            self.assertFalse(migrated["school"]["limit_enabled"])
+            self.assertTrue(migrated["work"]["limit_enabled"])
+            self.assertEqual(migrated["work"]["times_per_day"], 3)
 
     def test_adventure_wins_after_configured_time(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

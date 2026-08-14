@@ -6,7 +6,7 @@
 
 ### 原调度模式（默认）
 
-“测试：启用动态数学模型调度”保持关闭时，程序继续使用原来的金币阈值逻辑：金币达到阈值优先学习，金币不足则打工。用户原先选择的课程、岗位、每日次数、雇佣和照顾设置全部继续生效。
+“测试：启用动态数学模型调度”保持关闭时，程序继续使用原来的金币阈值逻辑：金币达到阈值优先学习，金币不足则打工。学习和打工都可分别选择“不限次数”或开启每日次数限制；达到上限后当天不再安排该任务，第二天由每日进度自动清零。用户原先选择的课程、岗位、雇佣和照顾设置全部继续生效。
 
 ### 动态数学模型（测试）
 
@@ -31,7 +31,7 @@ The assistant keeps two independent school/work scheduling modes. They can be sw
 
 ### Classic scheduler (default)
 
-When **Test: enable dynamic mathematical scheduler** is off, the existing coin-threshold behavior remains unchanged: study above the threshold and work below it. Existing course, job, daily limit, hiring, and care settings are preserved.
+When **Test: enable dynamic mathematical scheduler** is off, the existing coin-threshold behavior remains unchanged: study above the threshold and work below it. Study and work can each be unlimited or use an independent daily run limit. Once a limit is reached, that task is skipped until daily progress resets the next day. Existing course, job, hiring, and care settings are preserved.
 
 ### Dynamic mathematical scheduler (experimental)
 
