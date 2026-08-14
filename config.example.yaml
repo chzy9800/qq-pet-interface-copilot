@@ -82,6 +82,7 @@
     "check_interval_seconds": 60,
     "hunger_threshold": 80,
     "verify_delay_seconds": 1,
+    "verify_attempts": 5,
     "failure_cooldown_seconds": 600,
     "targets": []
   },

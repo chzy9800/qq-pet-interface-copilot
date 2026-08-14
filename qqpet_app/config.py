@@ -108,6 +108,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "check_interval_seconds": 60,
         "hunger_threshold": 80,
         "verify_delay_seconds": 1,
+        "verify_attempts": 5,
         "failure_cooldown_seconds": 600,
         "targets": [],
     },
@@ -322,6 +323,8 @@ class ConfigStore:
             raise ValueError("friend_care.hunger_threshold 必须在 0 到 100 之间")
         if float(config["friend_care"]["verify_delay_seconds"]) < 0:
             raise ValueError("friend_care.verify_delay_seconds 不能小于 0")
+        if not 1 <= int(config["friend_care"]["verify_attempts"]) <= 10:
+            raise ValueError("friend_care.verify_attempts 必须在 1 到 10 之间")
         if float(config["friend_care"]["failure_cooldown_seconds"]) < 0:
             raise ValueError("friend_care.failure_cooldown_seconds 不能小于 0")
         targets = config["friend_care"].get("targets", [])

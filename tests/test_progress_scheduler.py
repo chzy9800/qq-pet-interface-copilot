@@ -294,6 +294,7 @@ class ProgressAndSchedulerTests(unittest.TestCase):
                     "check_interval_seconds": 15,
                     "hunger_threshold": 80,
                     "verify_delay_seconds": 0,
+                    "verify_attempts": 3,
                     "failure_cooldown_seconds": 600,
                     "targets": [
                         {"uin": "10001", "pet_id": "friend-pet", "name": "好友甲"}
@@ -316,10 +317,104 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             )
             self.assertEqual(
                 scheduler._run_friend_care_if_due(object(), config),
-                "friend_feed_failed",
+                "friend_feed_pending",
             )
             self.assertEqual(scheduler.progress.count("friend_feed"), 0)
             self.assertIsNotNone(scheduler.progress.active_care_block("friend_feed:10001"))
+
+    def test_friend_care_retries_fresh_state_without_resending_feed(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["friend_care"].update(
+                {
+                    "enabled": True,
+                    "check_interval_seconds": 15,
+                    "hunger_threshold": 80,
+                    "verify_delay_seconds": 0,
+                    "verify_attempts": 3,
+                    "targets": [
+                        {"uin": "10001", "pet_id": "friend-pet", "name": "好友甲"}
+                    ],
+                }
+            )
+
+            class FriendClient:
+                def __init__(self):
+                    self.reads = 0
+                    self.feed_calls = 0
+
+                def query_values(self):
+                    self.reads += 1
+                    return PetValues(hunger=90 if self.reads >= 4 else 50, clean=90)
+
+                def feed(self):
+                    self.feed_calls += 1
+
+            friend_client = FriendClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: friend_client,
+            )
+            self.assertEqual(
+                scheduler._run_friend_care_if_due(object(), config), "friend_feed"
+            )
+            self.assertEqual(friend_client.feed_calls, 1)
+            self.assertEqual(friend_client.reads, 4)
+            self.assertEqual(scheduler.progress.count("friend_feed"), 1)
+
+    def test_friend_care_accepts_inventory_decrease_when_friend_state_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["safety"]["safe_mode"] = False
+            config["friend_care"].update(
+                {
+                    "enabled": True,
+                    "check_interval_seconds": 15,
+                    "hunger_threshold": 80,
+                    "verify_delay_seconds": 0,
+                    "verify_attempts": 2,
+                    "targets": [
+                        {"uin": "10001", "pet_id": "friend-pet", "name": "好友甲"}
+                    ],
+                }
+            )
+
+            class OwnClient:
+                def __init__(self):
+                    self.reads = 0
+
+                def query_food_inventory(self):
+                    self.reads += 1
+                    return FoodInventory(biscuits=2 if self.reads == 1 else 1)
+
+            class FriendClient:
+                def __init__(self):
+                    self.feed_calls = 0
+
+                def query_values(self):
+                    return PetValues(hunger=50, clean=90)
+
+                def feed(self):
+                    self.feed_calls += 1
+
+            own_client = OwnClient()
+            friend_client = FriendClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: friend_client,
+            )
+            self.assertEqual(
+                scheduler._run_friend_care_if_due(own_client, config), "friend_feed"
+            )
+            self.assertEqual(friend_client.feed_calls, 1)
+            self.assertEqual(scheduler.progress.count("friend_feed"), 1)
 
     def test_employed_recall_waits_for_best_split_and_counts_once(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
