@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -54,6 +55,32 @@ class FriendVisitTests(unittest.TestCase):
         matched = current_pet_friends(friends, live, captured)
         self.assertEqual(set(matched), {"100"})
         self.assertEqual(matched["100"].pet_id, "live-100")
+
+    def test_legacy_duplicate_poke_failure_is_migrated_to_visit_success(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "friend-visits-2026-08-15.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "date": "2026-08-15",
+                        "scan": {"total": 1, "eligible": 1, "at": "now"},
+                        "friends": {
+                            "200": {
+                                "status": "failed",
+                                "pet_id": "pet-200",
+                                "detail": "手机 QQ 写入返回错误 136202：不能重复点赞哦",
+                                "poked": False,
+                            }
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            progress = FriendVisitProgress(folder, "2026-08-15")
+            record = progress.snapshot()["friends"]["200"]
+            self.assertEqual(record["status"], "success")
+            self.assertTrue(record["poked"])
 
 
 if __name__ == "__main__":

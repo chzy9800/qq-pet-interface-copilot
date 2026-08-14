@@ -17,6 +17,7 @@ EMPTY_COUNTS = {
     "wash": 0,
     "pk": 0,
     "friend_feed": 0,
+    "friend_wash": 0,
 }
 
 
@@ -39,6 +40,7 @@ class DailyProgress:
                 "settled_story_ids": [],
                 "encouraged_story_ids": [],
                 "optimizer": {"active_minutes": 0, "opening_gold": None},
+                "economy_profile": {},
                 "work_hire_unavailable_uins": [],
             }
         try:
@@ -55,6 +57,7 @@ class DailyProgress:
                 "settled_story_ids": [],
                 "encouraged_story_ids": [],
                 "optimizer": {"active_minutes": 0, "opening_gold": None},
+                "economy_profile": {},
                 "work_hire_unavailable_uins": [],
             }
         loaded.setdefault("history", [])
@@ -63,6 +66,7 @@ class DailyProgress:
         loaded.setdefault("settled_story_ids", [])
         loaded.setdefault("encouraged_story_ids", [])
         loaded.setdefault("optimizer", {"active_minutes": 0, "opening_gold": None})
+        loaded.setdefault("economy_profile", {})
         loaded.setdefault("work_hire_unavailable_uins", [])
         loaded["counts"] = {**EMPTY_COUNTS, **loaded.get("counts", {})}
         return loaded
@@ -127,6 +131,25 @@ class DailyProgress:
                 optimizer["opening_gold"] = float(current_gold)
                 self._save()
             return copy.deepcopy(optimizer)
+
+    def economy_profile(self) -> dict[str, Any]:
+        """Return cross-day economics learned from verified server changes."""
+        with self._lock:
+            return copy.deepcopy(self._state.setdefault("economy_profile", {}))
+
+    def record_supply_observation(
+        self, kind: str, *, price: float | None = None, restore: float | None = None
+    ) -> None:
+        if kind not in {"food", "bath"}:
+            return
+        with self._lock:
+            profile = self._state.setdefault("economy_profile", {}).setdefault(kind, {})
+            if price is not None and price > 0:
+                profile["price"] = float(price)
+            if restore is not None and restore > 0:
+                profile["restore"] = float(restore)
+            profile["verified_at"] = datetime.now().astimezone().isoformat()
+            self._save()
 
     def record_activity_minutes(self, kind: str, minutes: int) -> int:
         if kind not in {"school", "work"} or minutes <= 0:

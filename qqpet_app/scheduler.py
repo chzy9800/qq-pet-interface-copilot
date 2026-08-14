@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import math
 import random
 import threading
 import time
@@ -29,7 +30,11 @@ from .pk_progress import PKProgress
 from .progress import DailyProgress
 from .notifications import NotificationManager
 from .mobile_protocol import reader_from_config
-from .optimizer import AdaptiveDecision, choose_adaptive_plan
+from .optimizer import (
+    AdaptiveDecision,
+    choose_adaptive_plan,
+    derive_auto_optimization_inputs,
+)
 
 
 LogCallback = Callable[[str], None]
@@ -64,6 +69,8 @@ class Scheduler:
         self._failure_alerted = False
         self._last_friend_care_check = 0.0
         self._login_guard_blocked = False
+        self._optimization_auto_summary = "等待首次读取服务器目录"
+        self._next_optimization_probe_at = 0.0
 
     @staticmethod
     def _make_client(config: dict) -> NapCatClient:
@@ -148,10 +155,18 @@ class Scheduler:
     ) -> str | None:
         pk = config["pk"]
         now = now or datetime.now()
-        if not pk["enabled"] or now.strftime("%H:%M") < str(pk["start_time"]):
+        if not pk["enabled"]:
             return None
         if self.pk_progress.daily_run_completed():
             return None
+        batch_started = self.pk_progress.daily_run_started()
+        if not batch_started:
+            # Do not catch up simply because the application was opened after
+            # the configured time. The batch is armed only during that exact
+            # minute, then persisted so a legitimately started batch can resume.
+            if now.strftime("%H:%M") != str(pk["start_time"]):
+                return None
+            self.pk_progress.mark_daily_run_started()
         limit = int(pk["max_per_day"])
         if limit > 0 and self.pk_progress.succeeded() >= limit:
             self.pk_progress.mark_daily_run_completed("已达到每日 PK 上限")
@@ -169,10 +184,11 @@ class Scheduler:
             self.activity("安全模式：已计划自动 PK")
             return "pk"
 
-        self.log(
-            f"每日定时 PK 批次开始：计划时间 {pk['start_time']}，"
-            f"今日上限 {limit if limit > 0 else '按好友额度'} 次"
-        )
+        if not batch_started:
+            self.log(
+                f"每日定时 PK 批次开始：计划时间 {pk['start_time']}，"
+                f"今日上限 {limit if limit > 0 else '按好友额度'} 次"
+            )
         completed_this_batch = 0
         # max_per_day=0 means exhaust the configured friend quotas. Keep a hard
         # safety ceiling in case a fixed opponent is configured without a limit.
@@ -268,10 +284,12 @@ class Scheduler:
             )
             self.progress.increment("pk")
             completed_this_batch += 1
+            verification = "状态变化复查" if result.state_verified else "服务器结算"
             self.log(
-                f"PK 已由服务器验证：金币 {result.gold_delta:+.0f}，"
+                f"PK 已由{verification}验证：金币 {result.gold_delta:+.0f}，"
                 f"心情 {result.mood_delta:+.0f}，体力 -{result.hunger_cost:.0f}，"
-                f"清洁 -{result.clean_cost:.0f}，storyId={result.story_id}；"
+                f"清洁 -{result.clean_cost:.0f}"
+                f"{f'，storyId={result.story_id}' if result.story_id else ''}；"
                 f"今日成功 {self.pk_progress.succeeded()} 次"
             )
 
@@ -486,6 +504,21 @@ class Scheduler:
         if self._under_limit(config, counts, "work"):
             jobs = client.query_work_catalog().jobs
         state = self.progress.optimizer_state(values.gold)
+        food_inventory = client.query_food_inventory()
+        bath_inventory = client.query_bath_inventory()
+        bath_item_id = (
+            "2" if str(config["care"].get("bath_item", "soap")) == "bath_ball" else "1"
+        )
+        automatic = derive_auto_optimization_inputs(
+            courses=courses,
+            jobs=jobs,
+            bath_items=client.query_bath_items(),
+            food_count=food_inventory.biscuits,
+            bath_count=bath_inventory.count(bath_item_id),
+            preferred_bath_item_id=bath_item_id,
+            learned_profile=self.progress.economy_profile(),
+        )
+        self._optimization_auto_summary = automatic.summary
         decision = choose_adaptive_plan(
             courses=courses,
             jobs=jobs,
@@ -493,18 +526,19 @@ class Scheduler:
             current_gold=values.gold,
             opening_gold=float(state.get("opening_gold", values.gold)),
             active_minutes=int(state.get("active_minutes", 0)),
-            daily_active_minutes=int(settings.get("daily_active_minutes", 1440)),
-            safety_floor=float(settings.get("safety_floor", 200)),
-            preserve_opening_gold=bool(settings.get("preserve_opening_gold", True)),
-            course_hunger_cost=float(settings.get("course_hunger_cost", 10)),
-            course_clean_cost=float(settings.get("course_clean_cost", 4)),
-            work_hunger_cost=float(settings.get("work_hunger_cost", 4)),
-            work_clean_cost=float(settings.get("work_clean_cost", 2)),
-            biscuit_price=float(settings.get("biscuit_price", 5)),
-            biscuit_restore=float(settings.get("biscuit_restore", 10)),
-            soap_price=float(settings.get("soap_price", 2)),
-            soap_restore=float(settings.get("soap_restore", 10)),
+            daily_active_minutes=automatic.daily_active_minutes,
+            safety_floor=automatic.safety_floor,
+            preserve_opening_gold=automatic.preserve_opening_gold,
+            course_hunger_cost=automatic.course_hunger_cost,
+            course_clean_cost=automatic.course_clean_cost,
+            work_hunger_cost=automatic.work_hunger_cost,
+            work_clean_cost=automatic.work_clean_cost,
+            biscuit_price=automatic.biscuit_price,
+            biscuit_restore=automatic.biscuit_restore,
+            soap_price=automatic.soap_price,
+            soap_restore=automatic.soap_restore,
         )
+        self.log(automatic.summary)
         self.log(decision.explanation)
         return decision
 
@@ -723,6 +757,19 @@ class Scheduler:
         if delay:
             self._stop.wait(delay)
 
+    def _supply_restore(self, kind: str, fallback: float) -> float:
+        profile = self.progress.economy_profile().get(kind, {})
+        if isinstance(profile, dict):
+            observed = float(profile.get("restore", 0) or 0)
+            if observed > 0:
+                return observed
+        return max(1.0, float(fallback))
+
+    @staticmethod
+    def _needed_supply_count(current: float, target: float, restore: float) -> int:
+        missing = max(0.0, float(target) - float(current))
+        return max(1, min(20, math.ceil(missing / max(1.0, float(restore)))))
+
     def _scan_friends_if_due(
         self, client: NapCatClient, config: dict, now: datetime | None = None
     ) -> None:
@@ -784,21 +831,6 @@ class Scheduler:
                 path, response, after_rules = client.visit_friend_verified(
                     friend.user_id, pet.pet_id
                 )
-                poked = False
-                if visit_config.get("poke_enabled", False):
-                    poked = bool(client.poke_friend(friend.user_id).body)
-                self.friend_progress.mark(
-                    friend.user_id,
-                    "success",
-                    pet_id=pet.pet_id,
-                    detail=(
-                        f"动态路径 {path[0]}/{path[1]}/{path[2]}；"
-                        "手机协议已接收访问事件；"
-                        f"复查规则 {after_rules.declared_count} 条"
-                    ),
-                    poked=poked,
-                )
-                succeeded += 1
             except Exception as exc:
                 self.friend_progress.mark(
                     friend.user_id,
@@ -807,6 +839,33 @@ class Scheduler:
                     detail=str(exc),
                 )
                 failed += 1
+            else:
+                detail = (
+                    f"动态路径 {path[0]}/{path[1]}/{path[2]}；"
+                    "手机协议已接收访问事件；"
+                    f"复查规则 {after_rules.declared_count} 条"
+                )
+                poked = False
+                if visit_config.get("poke_enabled", False):
+                    try:
+                        poked = bool(client.poke_friend(friend.user_id).body)
+                        detail += "；踩踩已确认" if poked else "；踩踩未返回业务确认"
+                    except Exception as exc:
+                        poke_error = str(exc)
+                        if "136202" in poke_error or "不能重复点赞" in poke_error:
+                            poked = True
+                            detail += "；踩踩今日已完成（服务器拒绝重复点赞）"
+                        else:
+                            detail += f"；踩踩失败：{poke_error}"
+                # 访问与踩踩分开判定：踩踩失败不能覆盖已经验证成功的访问。
+                self.friend_progress.mark(
+                    friend.user_id,
+                    "success",
+                    pet_id=pet.pet_id,
+                    detail=detail,
+                    poked=poked,
+                )
+                succeeded += 1
             if index + 1 < len(candidates):
                 minimum = float(visit_config.get("interval_min_seconds", 3))
                 maximum = float(visit_config.get("interval_max_seconds", 5))
@@ -817,7 +876,7 @@ class Scheduler:
         )
 
     def _run_friend_care_if_due(
-        self, _client: NapCatClient, config: dict
+        self, client: NapCatClient, config: dict
     ) -> str | None:
         care = config["friend_care"]
         targets = care.get("targets", [])
@@ -828,88 +887,249 @@ class Scheduler:
         if self._last_friend_care_check and now - self._last_friend_care_check < interval:
             return None
         self._last_friend_care_check = now
-        threshold = float(care.get("hunger_threshold", 80))
+        feed_enabled = bool(care.get("feed_enabled", True))
+        clean_enabled = bool(care.get("clean_enabled", True))
+        hunger_threshold = float(care.get("hunger_threshold", 80))
+        clean_threshold = float(care.get("clean_threshold", 80))
+        attempts = max(1, min(10, int(care.get("verify_attempts", 5))))
+        base_delay = max(0.0, float(care.get("verify_delay_seconds", 1)))
+        cooldown = float(care.get("failure_cooldown_seconds", 600))
         for target in targets:
             uin = str(target["uin"])
             pet_id = str(target["pet_id"])
             name = str(target.get("name") or uin)
-            block_key = f"friend_feed:{uin}"
-            if self.progress.active_care_block(block_key):
+            feed_block_key = f"friend_feed:{uin}"
+            wash_block_key = f"friend_wash:{uin}"
+            info_block_key = f"friend_info:{uin}"
+            if self.progress.active_care_block(info_block_key):
                 continue
             friend_config = copy.deepcopy(config)
             friend_config["account"]["pet_id"] = pet_id
             try:
                 friend_client = self.client_factory(friend_config)
-                before = friend_client.query_values()
+                current = client.query_friend_pet_values(uin, pet_id)
             except Exception as exc:
-                cooldown = float(care.get("failure_cooldown_seconds", 600))
-                self.progress.set_care_block(block_key, f"好友状态读取失败：{exc}", cooldown)
+                self.progress.set_care_block(
+                    info_block_key, f"好友宠物信息读取失败：{exc}", cooldown
+                )
                 self.log(f"好友照顾检查失败：{name}（QQ {uin}）：{exc}")
                 continue
+            self.progress.clear_care_block(info_block_key)
             self.log(
-                f"好友照顾检查：{name}（QQ {uin}）体力 {before.hunger:.1f}/100"
+                f"好友照顾检查：{name}（QQ {uin}）饥饿度 "
+                f"{current.hunger:.1f}/100，清洁 {current.clean:.1f}/100"
+                f"（好友宠物信息接口）"
             )
-            if before.hunger >= threshold:
-                self.progress.clear_care_block(block_key)
-                continue
-            self.activity(f"好友 {name} 体力不足，正在自动喂食")
-            if self._safe_or_blocked(config, f"给好友 {name} 喂食"):
-                return "friend_feed_blocked"
 
-            # 好友状态由另一条读取接口返回，写入成功后可能短暂读到旧值。
-            # 成功只由当前好友的体力上涨确认，不能使用账号级食物库存推断。
-            try:
-                friend_client.feed()
-            except Exception as exc:
-                cooldown = float(care.get("failure_cooldown_seconds", 600))
-                self.progress.set_care_block(block_key, f"好友喂食请求失败：{exc}", cooldown)
-                self.log(f"好友自动喂食失败：{name}（QQ {uin}）：{exc}")
-                return "friend_feed_failed"
-
-            attempts = max(1, min(10, int(care.get("verify_attempts", 5))))
-            base_delay = max(0.0, float(care.get("verify_delay_seconds", 1)))
-            after = before
-            confirmed = False
-            last_read_error = ""
-            for attempt in range(1, attempts + 1):
-                # 递增等待给服务器跨接口同步留出时间；期间绝不重发喂食指令。
-                self._stop.wait(base_delay * attempt)
-                try:
-                    after = friend_client.query_values()
-                    last_read_error = ""
-                    if after.hunger > before.hunger:
-                        confirmed = True
-                        break
-                except Exception as exc:
-                    last_read_error = str(exc)
-
-                if attempt < attempts:
-                    detail = f"（读取异常：{last_read_error}）" if last_read_error else ""
-                    self.log(
-                        f"好友状态暂未刷新：{name}（QQ {uin}）体力仍为 "
-                        f"{after.hunger:.1f}；将在下一次刷新继续确认 "
-                        f"{attempt}/{attempts}{detail}"
+            if current.hunger >= hunger_threshold:
+                self.progress.clear_care_block(feed_block_key)
+            elif feed_enabled and not self.progress.active_care_block(feed_block_key):
+                max_feeds = max(
+                    1,
+                    min(20, int(care.get("max_feeds_per_friend_per_check", 10))),
+                )
+                feeds_this_check = 0
+                while (
+                    current.hunger < hunger_threshold
+                    and feeds_this_check < max_feeds
+                ):
+                    feed_restore = self._supply_restore(
+                        "food", float(config["optimization"].get("biscuit_restore", 10))
                     )
+                    batch_count = min(
+                        max_feeds - feeds_this_check,
+                        self._needed_supply_count(
+                            current.hunger, hunger_threshold, feed_restore
+                        ),
+                    )
+                    self.activity(
+                        f"好友 {name} 饥饿度 {current.hunger:.1f}，"
+                        f"正在一次投喂 {batch_count} 份"
+                    )
+                    if self._safe_or_blocked(config, f"给好友 {name} 喂食"):
+                        return "friend_feed_blocked"
+                    try:
+                        # 喂食无已验证数量字段，因此同批连续发送，批次结束后只刷新一次。
+                        for _ in range(batch_count):
+                            friend_client.feed()
+                    except Exception as exc:
+                        detail = str(exc)
+                        if "金币" in detail and any(
+                            word in detail for word in ("不足", "不够", "余额", "缺少")
+                        ):
+                            self.progress.set_care_block(
+                                feed_block_key, f"好友投喂停止：金币不足：{exc}", cooldown
+                            )
+                            self.log(
+                                f"好友连续投喂已停止：{name}（QQ {uin}）金币不足；"
+                                f"当前饥饿度 {current.hunger:.1f}"
+                            )
+                            return "friend_feed_insufficient_gold"
+                        self.progress.set_care_block(
+                            feed_block_key, f"好友喂食请求失败：{exc}", cooldown
+                        )
+                        self.log(f"好友自动喂食失败：{name}（QQ {uin}）：{exc}")
+                        return "friend_feed_failed"
 
-            if not confirmed:
-                cooldown = float(care.get("failure_cooldown_seconds", 600))
+                    after = current
+                    confirmed = False
+                    last_read_error = ""
+                    for attempt in range(1, attempts + 1):
+                        self._stop.wait(base_delay * attempt)
+                        try:
+                            # 重新调用 0x976c_0 GetOtherUserPet，禁止使用通用状态缓存。
+                            after = client.query_friend_pet_values(uin, pet_id)
+                            last_read_error = ""
+                            if after.hunger > current.hunger:
+                                confirmed = True
+                                break
+                        except Exception as exc:
+                            last_read_error = str(exc)
+                        if attempt < attempts:
+                            detail = (
+                                f"（读取异常：{last_read_error}）"
+                                if last_read_error
+                                else ""
+                            )
+                            self.log(
+                                f"好友宠物信息暂未刷新：{name}（QQ {uin}）饥饿度仍为 "
+                                f"{after.hunger:.1f}；继续重新调用好友信息接口 "
+                                f"{attempt}/{attempts}{detail}"
+                            )
+
+                    if not confirmed:
+                        self.progress.set_care_block(
+                            feed_block_key, "好友喂食已发送，等待好友宠物信息同步", cooldown
+                        )
+                        self.log(
+                            f"好友喂食已发送但好友信息尚未同步：{name}（QQ {uin}）"
+                            f"饥饿度仍为 {after.hunger:.1f}；本轮不会继续投喂，"
+                            f"{int(cooldown)} 秒后重新检查"
+                        )
+                        return "friend_feed_pending"
+
+                    feeds_this_check += batch_count
+                    count = self.progress.increment("friend_feed", batch_count)
+                    self.log(
+                        f"好友自动喂食已由好友宠物信息接口验证：{name}（QQ {uin}）"
+                        f"饥饿度 {current.hunger:.1f}→{after.hunger:.1f}；"
+                        f"本批使用 {batch_count} 份，今日好友喂食 {count} 份"
+                    )
+                    current = after
+
+                if current.hunger >= hunger_threshold:
+                    self.progress.clear_care_block(feed_block_key)
+                    self.activity(f"好友 {name} 投喂完成，饥饿度已达到配置值")
+                    return "friend_feed"
+
                 self.progress.set_care_block(
-                    block_key, "好友喂食已发送，等待好友状态同步", cooldown
+                    feed_block_key, "达到单轮连续投喂安全上限", cooldown
                 )
                 self.log(
-                    f"好友喂食已发送但状态尚未同步：{name}（QQ {uin}）体力仍为 "
-                    f"{after.hunger:.1f}；本轮不会重复喂食，{int(cooldown)} 秒后重新检查"
+                    f"好友连续投喂达到单轮上限 {max_feeds} 次：{name}（QQ {uin}）；"
+                    f"当前饥饿度 {current.hunger:.1f}，{int(cooldown)} 秒后重新检查"
                 )
-                return "friend_feed_pending"
-            self.progress.clear_care_block(block_key)
-            count = self.progress.increment("friend_feed")
-            self.activity(f"好友 {name} 喂食完成")
-            self.log(
-                f"好友自动喂食已由服务器验证：{name}（QQ {uin}）"
-                f"体力 {before.hunger:.1f}→{after.hunger:.1f}；"
-                f"今日好友喂食 {count} 次"
+                return "friend_feed_partial"
+
+            if current.clean >= clean_threshold:
+                self.progress.clear_care_block(wash_block_key)
+                continue
+            if not clean_enabled or self.progress.active_care_block(wash_block_key):
+                continue
+
+            max_washes = max(
+                1,
+                min(20, int(care.get("max_washes_per_friend_per_check", 10))),
             )
-            return "friend_feed"
+            bath_choice = str(care.get("bath_item", "soap"))
+            bath_item_id = "2" if bath_choice == "bath_ball" else "1"
+            bath_item_name = "沐浴球" if bath_choice == "bath_ball" else "香皂片"
+            washes_this_check = 0
+            while current.clean < clean_threshold and washes_this_check < max_washes:
+                bath_restore = self._supply_restore(
+                    "bath", float(config["optimization"].get("soap_restore", 10))
+                )
+                batch_count = min(
+                    max_washes - washes_this_check,
+                    self._needed_supply_count(current.clean, clean_threshold, bath_restore),
+                )
+                self.activity(
+                    f"好友 {name} 清洁 {current.clean:.1f}，正在一次使用 "
+                    f"{batch_count} 个{bath_item_name}清洁"
+                )
+                if self._safe_or_blocked(config, f"给好友 {name} 清洁"):
+                    return "friend_wash_blocked"
+                try:
+                    # 好友 petId 已写入 friend_client，pet_uin 明确指定目标好友。
+                    friend_client.use_bath_item(bath_item_id, uin, count=batch_count)
+                except Exception as exc:
+                    detail = str(exc)
+                    reason = (
+                        f"好友清洁停止：金币或洗护用品不足：{exc}"
+                        if any(word in detail for word in ("金币", "不足", "不够", "缺少"))
+                        else f"好友清洁请求失败：{exc}"
+                    )
+                    self.progress.set_care_block(wash_block_key, reason, cooldown)
+                    self.log(f"好友自动清洁失败：{name}（QQ {uin}）：{exc}")
+                    return "friend_wash_failed"
+
+                after = current
+                confirmed = False
+                last_read_error = ""
+                for attempt in range(1, attempts + 1):
+                    self._stop.wait(base_delay * attempt)
+                    try:
+                        # 成功只按重新读取到的好友清洁值上涨判定，禁止用库存推断。
+                        after = client.query_friend_pet_values(uin, pet_id)
+                        last_read_error = ""
+                        if after.clean > current.clean:
+                            confirmed = True
+                            break
+                    except Exception as exc:
+                        last_read_error = str(exc)
+                    if attempt < attempts:
+                        detail = (
+                            f"（读取异常：{last_read_error}）" if last_read_error else ""
+                        )
+                        self.log(
+                            f"好友宠物信息暂未刷新：{name}（QQ {uin}）清洁仍为 "
+                            f"{after.clean:.1f}；继续重新调用好友信息接口 "
+                            f"{attempt}/{attempts}{detail}"
+                        )
+
+                if not confirmed:
+                    self.progress.set_care_block(
+                        wash_block_key, "好友清洁已发送，等待好友宠物信息同步", cooldown
+                    )
+                    self.log(
+                        f"好友清洁已发送但好友信息尚未同步：{name}（QQ {uin}）"
+                        f"清洁仍为 {after.clean:.1f}；本轮不会继续清洁，"
+                        f"{int(cooldown)} 秒后重新检查"
+                    )
+                    return "friend_wash_pending"
+
+                washes_this_check += batch_count
+                count = self.progress.increment("friend_wash", batch_count)
+                self.log(
+                    f"好友自动清洁已由好友宠物信息接口验证：{name}（QQ {uin}）"
+                    f"清洁 {current.clean:.1f}→{after.clean:.1f}；"
+                    f"本批使用 {batch_count} 个，今日好友清洁 {count} 个"
+                )
+                current = after
+
+            if current.clean >= clean_threshold:
+                self.progress.clear_care_block(wash_block_key)
+                self.activity(f"好友 {name} 清洁完成，清洁值已达到配置值")
+                return "friend_wash"
+
+            self.progress.set_care_block(
+                wash_block_key, "达到单轮连续清洁安全上限", cooldown
+            )
+            self.log(
+                f"好友连续清洁达到单轮上限 {max_washes} 次：{name}（QQ {uin}）；"
+                f"当前清洁 {current.clean:.1f}，{int(cooldown)} 秒后重新检查"
+            )
+            return "friend_wash_partial"
         return None
 
     def run_once(self) -> str | None:
@@ -922,12 +1142,27 @@ class Scheduler:
         self._scan_friends_if_due(client, config)
         values = client.query_values()
         story = client.query_story()
+        preview_adaptive: AdaptiveDecision | None = None
+        optimization_enabled = bool(config.get("optimization", {}).get("enabled", False))
+        if optimization_enabled and time.monotonic() >= self._next_optimization_probe_at:
+            # Preload read-only economics even while another story or side task
+            # is active, so the settings page never waits for the next idle slot.
+            try:
+                preview_adaptive = self._adaptive_decision(client, config, values)
+                self._next_optimization_probe_at = time.monotonic() + 1800
+            except (QQPetError, ValueError, RuntimeError, AttributeError) as exc:
+                self._optimization_auto_summary = f"自动读取失败：{exc}；60 秒后重试"
+                self._next_optimization_probe_at = time.monotonic() + 60
+                self.log(f"动态优化预读取失败：{exc}")
+        elif not optimization_enabled:
+            self._optimization_auto_summary = "动态收益优化未启用"
         state = self.progress.snapshot()
         state["friend_visit_summary"] = self.friend_progress.summary()
         state["friend_care_summary"] = {
             "enabled": bool(config["friend_care"].get("enabled", False)),
             "targets": len(config["friend_care"].get("targets", [])),
             "feeds": int(state["counts"].get("friend_feed", 0)),
+            "washes": int(state["counts"].get("friend_wash", 0)),
         }
         pk_summary = self.pk_progress.snapshot()
         pk_summary["opponent_mode"] = config["pk"].get("opponent_mode", "fixed")
@@ -944,6 +1179,7 @@ class Scheduler:
             "biscuits": inventory.biscuits,
             "shrimp": inventory.shrimp,
         }
+        state["optimization_auto_summary"] = self._optimization_auto_summary
         if self.status_callback:
             bath_inventory = client.query_bath_inventory()
             state["bath_inventory"] = {
@@ -993,34 +1229,65 @@ class Scheduler:
                     self._block_care(config, "feed", "服务器未下发虾仁 foodId，无法安全发送虾仁喂食")
                     self.activity("虾仁接口目录暂不可用")
                     return "feed_unavailable"
-                if food_count <= 0:
+                food_restore = self._supply_restore(
+                    "food", float(config["optimization"].get("biscuit_restore", 10))
+                )
+                use_count = self._needed_supply_count(
+                    values.hunger, float(care["hunger_threshold"]), food_restore
+                )
+                if food_count < use_count:
                     if not care["auto_buy_supplies"]:
-                        self.activity("缺少食物，自动购买未开启")
-                        self._block_care(config, "feed", f"{food_name}不足，自动购买已关闭")
-                        return "feed_unavailable"
-                    if food_choice == "shrimp":
-                        self._block_care(
-                            config,
-                            "feed",
-                            "虾仁不足；当前金币购买接口只支持饼干，未发送错误购买指令",
+                        if food_count <= 0:
+                            self.activity("缺少食物，自动购买未开启")
+                            self._block_care(config, "feed", f"{food_name}不足，自动购买已关闭")
+                            return "feed_unavailable"
+                        use_count = food_count
+                    elif food_choice == "shrimp":
+                        if food_count <= 0:
+                            self._block_care(
+                                config,
+                                "feed",
+                                "虾仁不足；当前金币购买接口只支持饼干，未发送错误购买指令",
+                            )
+                            self.activity("虾仁不足，暂无法自动兑换")
+                            return "feed_unavailable"
+                        use_count = food_count
+                        self.log(
+                            f"虾仁仅有 {food_count} 个，低于本轮计划 {use_count} 个；"
+                            f"将一次使用现有库存并在刷新后重新计算"
                         )
-                        self.activity("虾仁不足，暂无法自动兑换")
-                        return "feed_unavailable"
-                    self.activity("正在购买食物")
-                    buy_count = int(care["food_purchase_count"])
-                    before_count = inventory.biscuits
-                    purchase = client.buy_food(buy_count)
-                    inventory = client.query_food_inventory()
-                    if purchase.bought <= 0 and inventory.biscuits <= before_count:
-                        self._block_care(config, "feed", "金币购买饼干未到账")
-                        self.activity("购买食物失败，等待重试")
-                        return "feed_unavailable"
-                    self.log(
-                        f"饼干不足，已用金币购买 {purchase.bought or buy_count} 个，"
-                        f"花费 {purchase.cost_gold}，当前饼干 {inventory.biscuits}"
-                    )
-                self.activity("正在喂食")
-                client.feed(food_id) if food_id else client.feed()
+                    else:
+                        self.activity("正在购买本轮所需食物")
+                        shortage = max(0, use_count - food_count)
+                        buy_count = max(shortage, int(care["food_purchase_count"]))
+                        before_count = inventory.biscuits
+                        purchase = client.buy_food(buy_count)
+                        inventory = client.query_food_inventory()
+                        if purchase.bought <= 0 and inventory.biscuits <= before_count:
+                            self._block_care(config, "feed", "金币购买饼干未到账")
+                            self.activity("购买食物失败，等待重试")
+                            return "feed_unavailable"
+                        bought = purchase.bought or max(0, inventory.biscuits - before_count)
+                        if bought > 0 and purchase.cost_gold > 0:
+                            self.progress.record_supply_observation(
+                                "food", price=purchase.cost_gold / bought
+                            )
+                        food_count = inventory.biscuits
+                        use_count = min(use_count, food_count)
+                        self.log(
+                            f"饼干不足，已用金币购买 {purchase.bought or buy_count} 个，"
+                            f"花费 {purchase.cost_gold}，当前饼干 {inventory.biscuits}"
+                        )
+                if use_count <= 0:
+                    self._block_care(config, "feed", f"{food_name}库存不足")
+                    return "feed_unavailable"
+                self.activity(
+                    f"正在按体力缺口一次使用 {use_count} 个{food_name}"
+                )
+                # 喂食封包尚未发现可靠的数量字段；同一批次连续发送所需份数，
+                # 全部发送后仅刷新一次状态，避免逐份查询造成延迟和误判。
+                for _ in range(use_count):
+                    client.feed(food_id) if food_id else client.feed()
                 self._verify_delay(config)
                 after = client.query_values()
                 inventory_after = client.query_food_inventory()
@@ -1044,10 +1311,15 @@ class Scheduler:
                     )
                 )
                 if after.hunger > values.hunger or inventory_selected_after < food_count:
+                    consumed = max(1, food_count - inventory_selected_after)
+                    if after.hunger > values.hunger:
+                        self.progress.record_supply_observation(
+                            "food", restore=(after.hunger - values.hunger) / consumed
+                        )
                     self.progress.clear_care_block("feed")
-                    self.progress.increment("feed")
+                    self.progress.increment("feed", consumed)
                     self.log(
-                        f"体力不足，已使用{food_name}自动喂食并验证成功："
+                        f"体力不足，已一次使用 {consumed} 个{food_name}并验证成功："
                         f"{values.hunger:.1f}→{after.hunger:.1f}，剩余{food_name} "
                         f"{inventory_selected_after}"
                     )
@@ -1065,43 +1337,83 @@ class Scheduler:
                 bath_choice = str(care.get("bath_item", "soap"))
                 bath_item_id = "2" if bath_choice == "bath_ball" else "1"
                 bath_item_name = "沐浴球" if bath_choice == "bath_ball" else "香皂片"
-                bath_count = bath_inventory.count(bath_item_id)
-                if bath_count <= 0:
-                    if not care["auto_buy_supplies"]:
-                        self.activity("缺少洗护用品，自动购买未开启")
-                        self._block_care(config, "wash", f"{bath_item_name}不足，自动购买已关闭")
-                        return "wash_unavailable"
-                    self.activity("正在购买洗护用品")
-                    buy_count = int(care["soap_purchase_count"])
-                    purchase = client.buy_bath_item(bath_item_id, buy_count)
-                    after_purchase = client.query_bath_inventory()
-                    if (
-                        not purchase.succeeded
-                        and after_purchase.count(bath_item_id) <= bath_count
-                    ):
-                        self._block_care(
-                            config,
-                            "wash",
-                            f"金币购买{bath_item_name}未成功（result={purchase.result}）",
-                        )
-                        self.activity("购买洗护用品失败，等待重试")
-                        return "wash_unavailable"
-                    bath_inventory = after_purchase
-                    bath_count = bath_inventory.count(bath_item_id)
-                    self.log(
-                        f"{bath_item_name}不足，已用金币购买 {buy_count} 个，"
-                        f"当前{bath_item_name} {bath_count}"
+                query_bath_items = getattr(client, "query_bath_items", None)
+                bath_catalog_item = next(
+                    (
+                        item
+                        for item in (query_bath_items() if callable(query_bath_items) else ())
+                        if item.item_id == bath_item_id
+                    ),
+                    None,
+                )
+                if bath_catalog_item is not None:
+                    self.progress.record_supply_observation(
+                        "bath",
+                        price=float(bath_catalog_item.gold_price),
+                        restore=float(bath_catalog_item.clean_gain),
                     )
-                self.activity("正在洗澡")
-                client.use_bath_item(bath_item_id)
+                bath_count = bath_inventory.count(bath_item_id)
+                bath_restore = (
+                    float(bath_catalog_item.clean_gain)
+                    if bath_catalog_item is not None and bath_catalog_item.clean_gain > 0
+                    else self._supply_restore(
+                        "bath", float(config["optimization"].get("soap_restore", 10))
+                    )
+                )
+                use_count = self._needed_supply_count(
+                    values.clean, float(care["clean_threshold"]), bath_restore
+                )
+                if bath_count < use_count:
+                    if not care["auto_buy_supplies"]:
+                        if bath_count <= 0:
+                            self.activity("缺少洗护用品，自动购买未开启")
+                            self._block_care(config, "wash", f"{bath_item_name}不足，自动购买已关闭")
+                            return "wash_unavailable"
+                        use_count = bath_count
+                    else:
+                        self.activity("正在购买本轮所需洗护用品")
+                        shortage = max(0, use_count - bath_count)
+                        buy_count = max(shortage, int(care["soap_purchase_count"]))
+                        purchase = client.buy_bath_item(bath_item_id, buy_count)
+                        after_purchase = client.query_bath_inventory()
+                        if (
+                            not purchase.succeeded
+                            and after_purchase.count(bath_item_id) <= bath_count
+                        ):
+                            self._block_care(
+                                config,
+                                "wash",
+                                f"金币购买{bath_item_name}未成功（result={purchase.result}）",
+                            )
+                            self.activity("购买洗护用品失败，等待重试")
+                            return "wash_unavailable"
+                        bath_inventory = after_purchase
+                        bath_count = bath_inventory.count(bath_item_id)
+                        use_count = min(use_count, bath_count)
+                        self.log(
+                            f"{bath_item_name}不足，已用金币购买 {buy_count} 个，"
+                            f"当前{bath_item_name} {bath_count}"
+                        )
+                if use_count <= 0:
+                    self._block_care(config, "wash", f"{bath_item_name}库存不足")
+                    return "wash_unavailable"
+                self.activity(
+                    f"正在按清洁缺口一次使用 {use_count} 个{bath_item_name}"
+                )
+                client.use_bath_item(bath_item_id, count=use_count)
                 self._verify_delay(config)
                 after = client.query_values()
                 bath_after = client.query_bath_inventory()
                 if after.clean > values.clean or bath_after.count(bath_item_id) < bath_count:
+                    consumed = max(1, bath_count - bath_after.count(bath_item_id))
+                    if after.clean > values.clean:
+                        self.progress.record_supply_observation(
+                            "bath", restore=(after.clean - values.clean) / consumed
+                        )
                     self.progress.clear_care_block("wash")
-                    self.progress.increment("wash")
+                    self.progress.increment("wash", consumed)
                     self.log(
-                        f"清洁不足，已消耗{bath_item_name}洗澡并验证成功："
+                        f"清洁不足，已一次使用 {consumed} 个{bath_item_name}并验证成功："
                         f"{values.clean:.1f}→{after.clean:.1f}，"
                         f"剩余{bath_item_name} {bath_after.count(bath_item_id)}"
                     )
@@ -1131,12 +1443,13 @@ class Scheduler:
             return "story"
 
         action = self.decide(config, values)
-        adaptive: AdaptiveDecision | None = None
+        adaptive: AdaptiveDecision | None = preview_adaptive
         # Adventure keeps its configured priority. School/work are selected by
         # the resource-aware planner whenever optimization is enabled.
         if action != "adventure" and config.get("optimization", {}).get("enabled", False):
             try:
-                adaptive = self._adaptive_decision(client, config, values)
+                if adaptive is None:
+                    adaptive = self._adaptive_decision(client, config, values)
                 action = (
                     "school" if adaptive.action == "study"
                     else "work" if adaptive.action == "work"

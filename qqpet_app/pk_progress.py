@@ -32,6 +32,8 @@ class PKProgress:
                 "gold_earned": 0.0,
                 "records": [],
                 "retry_after": 0.0,
+                "daily_run_started": False,
+                "daily_run_started_at": "",
                 "daily_run_completed": False,
                 "daily_run_completed_at": "",
                 "daily_run_reason": "",
@@ -47,6 +49,8 @@ class PKProgress:
         loaded.setdefault("gold_earned", 0.0)
         loaded.setdefault("records", [])
         loaded.setdefault("retry_after", 0.0)
+        loaded.setdefault("daily_run_started", False)
+        loaded.setdefault("daily_run_started_at", "")
         loaded.setdefault("daily_run_completed", False)
         loaded.setdefault("daily_run_completed_at", "")
         loaded.setdefault("daily_run_reason", "")
@@ -70,6 +74,18 @@ class PKProgress:
 
     def daily_run_completed(self) -> bool:
         return bool(self.snapshot().get("daily_run_completed", False))
+
+    def daily_run_started(self) -> bool:
+        return bool(self.snapshot().get("daily_run_started", False))
+
+    def mark_daily_run_started(self) -> None:
+        with self._lock:
+            state = self._load()
+            if state.get("daily_run_started"):
+                return
+            state["daily_run_started"] = True
+            state["daily_run_started_at"] = datetime.now().astimezone().isoformat()
+            self._save(state)
 
     def mark_daily_run_completed(self, reason: str) -> None:
         with self._lock:

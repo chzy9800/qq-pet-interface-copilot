@@ -64,17 +64,6 @@ SETTING_FIELDS = [
     ("scheduler.interval_seconds", "轮询间隔（秒）", int),
     ("scheduler.coin_threshold", "学习金币阈值", float),
     ("optimization.enabled", "测试：启用动态数学模型调度（关闭时使用原调度）", bool),
-    ("optimization.daily_active_minutes", "每日学习+打工规划分钟数", int),
-    ("optimization.safety_floor", "规划期末金币安全线", float),
-    ("optimization.preserve_opening_gold", "期末补回当天开始金币", bool),
-    ("optimization.course_hunger_cost", "每次学习消耗体力", float),
-    ("optimization.course_clean_cost", "每次学习消耗清洁", float),
-    ("optimization.work_hunger_cost", "每次打工消耗体力", float),
-    ("optimization.work_clean_cost", "每次打工消耗清洁", float),
-    ("optimization.biscuit_price", "饼干价格", float),
-    ("optimization.biscuit_restore", "饼干恢复体力", float),
-    ("optimization.soap_price", "香皂片价格", float),
-    ("optimization.soap_restore", "香皂片恢复清洁", float),
     ("school.enabled", "启用学习", bool),
     ("school.attribute", "学习属性 culture/physical/art", str),
     ("school.limit_enabled", "限制每日学习次数（关闭=不限）", bool),
@@ -111,10 +100,16 @@ SETTING_FIELDS = [
     ("friend_visits.whitelist", "好友白名单（逗号分隔，空=全部）", str),
     ("friend_visits.exclude", "好友排除名单（逗号分隔）", str),
     ("friend_care.enabled", "启用好友自动照顾", bool),
+    ("friend_care.feed_enabled", "启用好友自动喂食", bool),
+    ("friend_care.clean_enabled", "启用好友自动清洁", bool),
     ("friend_care.check_interval_seconds", "好友照顾检查间隔（秒）", float),
     ("friend_care.hunger_threshold", "好友体力喂食阈值", float),
+    ("friend_care.clean_threshold", "好友清洁洗护阈值", float),
+    ("friend_care.bath_item", "好友自动清洁使用物品", str),
     ("friend_care.verify_delay_seconds", "好友状态刷新基础间隔（秒）", float),
-    ("friend_care.verify_attempts", "好友喂食后刷新次数（1-10）", int),
+    ("friend_care.verify_attempts", "好友照顾后刷新次数（1-10）", int),
+    ("friend_care.max_feeds_per_friend_per_check", "单次检查最多连续投喂次数（1-20）", int),
+    ("friend_care.max_washes_per_friend_per_check", "单次检查最多连续清洁次数（1-20）", int),
     ("friend_care.failure_cooldown_seconds", "好友照顾失败冷却（秒）", float),
     ("care.enabled", "启用状态照顾", bool),
     ("care.hunger_threshold", "体力喂食阈值", float),
@@ -162,6 +157,10 @@ CHOICE_FIELDS = {
         "虾仁": "shrimp",
     },
     "care.bath_item": {
+        "香皂片": "soap",
+        "沐浴球": "bath_ball",
+    },
+    "friend_care.bath_item": {
         "香皂片": "soap",
         "沐浴球": "bath_ball",
     },
@@ -270,6 +269,9 @@ class MainWindow(tk.Tk):
         self.friend_care_friend_var = tk.StringVar(value="请先刷新好友")
         self.friend_care_uin_var = tk.StringVar()
         self.friend_care_status_var = tk.StringVar(value="照顾名单为空")
+        self.optimization_auto_var = tk.StringVar(
+            value="启用后自动读取课程、岗位、道具目录和库存；首次喂食后自动校准食物恢复量。"
+        )
         self.friend_care_friend_uins: dict[str, str] = {}
         self._notice_windows: list[tk.Toplevel] = []
         self.status_vars = {
@@ -625,6 +627,21 @@ class MainWindow(tk.Tk):
                 )
             self.setting_vars[path] = (variable, value_type)
             section_rows[key] += 1
+
+        optimization_section = section_frames["optimization"]
+        ttk.Label(
+            optimization_section,
+            textvariable=self.optimization_auto_var,
+            wraplength=760,
+            justify=tk.LEFT,
+        ).grid(
+            row=section_rows["optimization"],
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=6,
+            pady=(8, 5),
+        )
 
         connection_section = section_frames["connection"]
         pet_lookup_row = section_rows["connection"]
@@ -1181,7 +1198,7 @@ class MainWindow(tk.Tk):
         )
         ttk.Label(
             parent,
-            text="只监控名单中的好友；体力低于阈值才喂食，并重新读取好友体力验证。",
+            text="只监控名单中的好友；体力或清洁低于各自阈值时自动照顾，并重新读取好友宠物资料验证。",
             foreground="#666",
             wraplength=540,
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 12))
@@ -1247,7 +1264,8 @@ class MainWindow(tk.Tk):
         care = self.config_store.data["friend_care"]
         state = "已启用" if care.get("enabled") else "未启用"
         self.friend_care_status_var.set(
-            f"{state}；监控 {len(targets)} 位好友；低于 {float(care['hunger_threshold']):g} 自动喂食；"
+            f"{state}；监控 {len(targets)} 位好友；体力低于 {float(care['hunger_threshold']):g} 自动喂食；"
+            f"清洁低于 {float(care['clean_threshold']):g} 自动洗护；"
             f"每 {float(care['check_interval_seconds']):g} 秒检查"
         )
 
@@ -2106,7 +2124,14 @@ class MainWindow(tk.Tk):
                     used = summary_before["success"] + summary_before["already_visited"]
                     candidates = candidates[: max(0, limit - used)]
                 protocol_state = "no_candidates"
-                protocol_detail = "今天没有尚未处理的宠物好友"
+                summary_before = progress.summary()
+                processed = sum(summary_before.values())
+                protocol_detail = (
+                    f"今日记录已处理 {processed} 位宠物好友（成功 "
+                    f"{summary_before['success']}、无宠物 {summary_before['no_pet']}、"
+                    f"已访问 {summary_before['already_visited']}、失败 "
+                    f"{summary_before['failed']}），为避免重复访问或点赞，本轮未重发"
+                )
                 visited = 0
                 failed = 0
                 if candidates and config["safety"].get("safe_mode", True):
@@ -2119,24 +2144,6 @@ class MainWindow(tk.Tk):
                             path, response, after_rules = client.visit_friend_verified(
                                 friend.user_id, pet.pet_id
                             )
-                            poked = False
-                            poke_detail = ""
-                            if visit_config.get("poke_enabled", False):
-                                poke_response = client.poke_friend(friend.user_id)
-                                poked = bool(poke_response.body)
-                                poke_detail = "；踩踩已确认" if poked else "；踩踩未返回业务确认"
-                            progress.mark(
-                                friend.user_id,
-                                "success",
-                                pet_id=pet.pet_id,
-                                detail=(
-                                    f"动态路径 {path[0]}/{path[1]}/{path[2]}；"
-                                    "手机协议已接收访问事件；"
-                                    f"复查规则 {after_rules.declared_count} 条{poke_detail}"
-                                ),
-                                poked=poked,
-                            )
-                            visited += 1
                         except Exception as exc:
                             progress.mark(
                                 friend.user_id,
@@ -2145,6 +2152,36 @@ class MainWindow(tk.Tk):
                                 detail=str(exc),
                             )
                             failed += 1
+                        else:
+                            detail = (
+                                f"动态路径 {path[0]}/{path[1]}/{path[2]}；"
+                                "手机协议已接收访问事件；"
+                                f"复查规则 {after_rules.declared_count} 条"
+                            )
+                            poked = False
+                            if visit_config.get("poke_enabled", False):
+                                try:
+                                    poke_response = client.poke_friend(friend.user_id)
+                                    poked = bool(poke_response.body)
+                                    detail += (
+                                        "；踩踩已确认" if poked else "；踩踩未返回业务确认"
+                                    )
+                                except Exception as exc:
+                                    poke_error = str(exc)
+                                    if "136202" in poke_error or "不能重复点赞" in poke_error:
+                                        poked = True
+                                        detail += "；踩踩今日已完成（服务器拒绝重复点赞）"
+                                    else:
+                                        detail += f"；踩踩失败：{poke_error}"
+                            # 访问已经验证成功后，无论踩踩结果如何都保留访问成功。
+                            progress.mark(
+                                friend.user_id,
+                                "success",
+                                pet_id=pet.pet_id,
+                                detail=detail,
+                                poked=poked,
+                            )
+                            visited += 1
                         if index + 1 < len(candidates):
                             minimum = float(visit_config.get("interval_min_seconds", 3))
                             maximum = float(visit_config.get("interval_max_seconds", 5))
@@ -2434,6 +2471,12 @@ class MainWindow(tk.Tk):
                     self.status_vars["mood"].set(f"{values.feel:.1f}/100")
                     self.status_vars["hunger"].set(f"{values.hunger:.1f}/100")
                     self.status_vars["clean"].set(f"{values.clean:.1f}/100")
+                    self.optimization_auto_var.set(
+                        state.get(
+                            "optimization_auto_summary",
+                            "等待调度器自动读取服务器目录",
+                        )
+                    )
                     counts = state["counts"]
                     self.status_vars["counts"].set(
                         f"学{counts['school']} 工{counts['work']} "
@@ -2470,7 +2513,8 @@ class MainWindow(tk.Tk):
                         care_state = "开启" if care_summary.get("enabled") else "关闭"
                         self.status_vars["friend_care"].set(
                             f"{care_state} / 名单 {care_summary.get('targets', 0)} / "
-                            f"今日喂食 {care_summary.get('feeds', 0)}"
+                            f"今日喂食 {care_summary.get('feeds', 0)} / "
+                            f"今日清洁 {care_summary.get('washes', 0)}"
                         )
                 elif kind == "connection":
                     connection_text = str(payload)
@@ -2566,12 +2610,14 @@ class MainWindow(tk.Tk):
                     self.friend_care_add_button.configure(state=tk.NORMAL)
                     self.friend_care_status_var.set(
                         f"已加入 {target['name']}（QQ {target['uin']}）；"
-                        f"当前体力 {values.hunger:.1f}/100，自动照顾已启用"
+                        f"当前体力 {values.hunger:.1f}/100、清洁 {values.clean:.1f}/100，"
+                        f"自动照顾已启用"
                     )
                     self._append_log(
                         f"[{datetime.now():%H:%M:%S}] 已加入自动照顾名单："
                         f"{target['name']}（QQ {target['uin']}），"
-                        f"petId={target['pet_id']}，当前体力 {values.hunger:.1f}"
+                        f"petId={target['pet_id']}，当前体力 {values.hunger:.1f}、"
+                        f"清洁 {values.clean:.1f}"
                     )
                 elif kind == "friend_care_target_error":
                     self.friend_care_add_button.configure(state=tk.NORMAL)

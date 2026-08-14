@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from qqpet_app.client import (
     AdventureOption,
@@ -40,6 +41,65 @@ def oidb_response(command: int, sub: int, body: bytes) -> dict:
 
 
 class ProtoAndClientTests(unittest.TestCase):
+    def test_pk_empty_write_is_confirmed_by_fresh_state_delta_without_resend(self) -> None:
+        client = NapCatClient("", "", "self-pet")
+        states = iter(
+            (
+                PetValues(feel=100, gold=100, hunger=90, clean=90),
+                PetValues(feel=100, gold=149, hunger=85, clean=85),
+            )
+        )
+        client.query_values = lambda: next(states)  # type: ignore[method-assign]
+
+        def empty_start(_uin, _pet_id):
+            raise QQPetEmptyResponse("OidbSvcTrpcTcp.0x975e_1")
+
+        client.start_pk = empty_start  # type: ignore[method-assign]
+        with patch("qqpet_app.client.time.sleep", return_value=None):
+            result = client.perform_pk("10001", "friend-pet", 9)
+        self.assertTrue(result.verified)
+        self.assertTrue(result.state_verified)
+        self.assertEqual(result.story_id, "")
+        self.assertEqual(result.gold_delta, 49)
+        self.assertEqual(result.hunger_cost, 5)
+        self.assertEqual(result.clean_cost, 5)
+
+    def test_query_friend_pet_values_uses_get_other_user_pet_and_decodes_hunger(self) -> None:
+        captured = []
+
+        def value(current: float) -> bytes:
+            return field_fixed32(3, current)
+
+        display = (
+            field_bytes(1, value(95))
+            + field_bytes(2, value(62))
+            + field_bytes(3, value(88))
+            + field_bytes(4, value(245))
+        )
+        profile = field_string(5, "10001") + field_string(8, "friend-pet")
+        pet = field_bytes(4, profile) + field_bytes(
+            5, field_bytes(4, display)
+        )
+        response = field_varint(1, 1) + field_bytes(2, pet)
+
+        def read(command_name, command, sub_command, body):
+            captured.append((command_name, command, sub_command, body))
+            return response
+
+        client = NapCatClient(
+            "http://unused",
+            "token",
+            "self-pet",
+            oidb_read_transport=read,
+        )
+        values = client.query_friend_pet_values("10001", "friend-pet")
+        self.assertEqual(values.hunger, 62)
+        self.assertEqual(values.clean, 88)
+        self.assertEqual(
+            captured,
+            [("OidbSvcTrpcTcp.0x976c_0", 38764, 0, field_string(1, "10001"))],
+        )
+
     def test_work_selection_skips_server_rejected_career(self) -> None:
         client = NapCatClient("http://unused", "token", "pet")
         client.query_work_overview = lambda: WorkOverview(  # type: ignore[method-assign]
@@ -1022,7 +1082,7 @@ class ProtoAndClientTests(unittest.TestCase):
                 self.assertEqual(command, "OidbSvcTrpcTcp.0x9bf3_1")
                 self.assertEqual(first_string(request, 1), "pet")
                 self.assertEqual(first_string(request, 2), "1")
-                self.assertEqual(first_varint(request, 3), 1)
+                self.assertEqual(first_varint(request, 3), 3)
                 return oidb_response(39923, 1, field_varint(1, 45) + field_varint(3, 13))
 
             self.assertEqual(command, "OidbSvcTrpcTcp.0x9bd0_0")
@@ -1042,7 +1102,7 @@ class ProtoAndClientTests(unittest.TestCase):
         self.assertEqual((food.bought, food.cost_gold), (3, 6))
         bath = client.buy_bath_item("2", 5)
         self.assertTrue(bath.succeeded)
-        wash = client.use_bath_item("1")
+        wash = client.use_bath_item("1", count=3)
         self.assertEqual((wash.clean, wash.remaining), (45, 13))
 
 

@@ -96,6 +96,28 @@ class FriendVisitProgress:
         loaded.setdefault("date", self._date)
         loaded.setdefault("scan", {"total": 0, "eligible": 0, "at": ""})
         loaded.setdefault("friends", {})
+        migrated = False
+        for record in loaded["friends"].values():
+            detail = str(record.get("detail", ""))
+            if record.get("status") == "failed" and (
+                "136202" in detail or "不能重复点赞" in detail
+            ):
+                # Older versions wrapped visit + poke in one try block. This
+                # error can only occur after the visit was already verified,
+                # so retain that visit and classify the poke as already done.
+                record["status"] = "success"
+                record["poked"] = True
+                record["detail"] = (
+                    "手机协议已接收访问事件；踩踩今日已完成（服务器拒绝重复点赞）"
+                )
+                migrated = True
+        if migrated:
+            temp = self.path.with_suffix(".tmp")
+            temp.write_text(
+                json.dumps(loaded, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temp.replace(self.path)
         return loaded
 
     def _save(self) -> None:
