@@ -817,7 +817,7 @@ class Scheduler:
         )
 
     def _run_friend_care_if_due(
-        self, client: NapCatClient, config: dict
+        self, _client: NapCatClient, config: dict
     ) -> str | None:
         care = config["friend_care"]
         targets = care.get("targets", [])
@@ -857,13 +857,7 @@ class Scheduler:
                 return "friend_feed_blocked"
 
             # 好友状态由另一条读取接口返回，写入成功后可能短暂读到旧值。
-            # 先记录本账号食物库存，以便好友状态延迟时用库存消耗交叉验证。
-            inventory_before = None
-            try:
-                inventory_before = client.query_food_inventory()
-            except Exception:
-                # 库存只是辅助证据，读取失败不能阻止好友喂食。
-                pass
+            # 成功只由当前好友的体力上涨确认，不能使用账号级食物库存推断。
             try:
                 friend_client.feed()
             except Exception as exc:
@@ -875,8 +869,7 @@ class Scheduler:
             attempts = max(1, min(10, int(care.get("verify_attempts", 5))))
             base_delay = max(0.0, float(care.get("verify_delay_seconds", 1)))
             after = before
-            confirmed_by = ""
-            inventory_after = inventory_before
+            confirmed = False
             last_read_error = ""
             for attempt in range(1, attempts + 1):
                 # 递增等待给服务器跨接口同步留出时间；期间绝不重发喂食指令。
@@ -885,19 +878,10 @@ class Scheduler:
                     after = friend_client.query_values()
                     last_read_error = ""
                     if after.hunger > before.hunger:
-                        confirmed_by = "好友体力刷新"
+                        confirmed = True
                         break
                 except Exception as exc:
                     last_read_error = str(exc)
-
-                if inventory_before is not None:
-                    try:
-                        inventory_after = client.query_food_inventory()
-                        if inventory_after.total < inventory_before.total:
-                            confirmed_by = "食物库存减少"
-                            break
-                    except Exception:
-                        pass
 
                 if attempt < attempts:
                     detail = f"（读取异常：{last_read_error}）" if last_read_error else ""
@@ -907,7 +891,7 @@ class Scheduler:
                         f"{attempt}/{attempts}{detail}"
                     )
 
-            if not confirmed_by:
+            if not confirmed:
                 cooldown = float(care.get("failure_cooldown_seconds", 600))
                 self.progress.set_care_block(
                     block_key, "好友喂食已发送，等待好友状态同步", cooldown
@@ -920,12 +904,9 @@ class Scheduler:
             self.progress.clear_care_block(block_key)
             count = self.progress.increment("friend_feed")
             self.activity(f"好友 {name} 喂食完成")
-            evidence = f"，确认依据：{confirmed_by}"
-            if confirmed_by == "食物库存减少" and inventory_before and inventory_after:
-                evidence += f" {inventory_before.total}→{inventory_after.total}"
             self.log(
                 f"好友自动喂食已由服务器验证：{name}（QQ {uin}）"
-                f"{before.hunger:.1f}→{after.hunger:.1f}{evidence}；"
+                f"体力 {before.hunger:.1f}→{after.hunger:.1f}；"
                 f"今日好友喂食 {count} 次"
             )
             return "friend_feed"

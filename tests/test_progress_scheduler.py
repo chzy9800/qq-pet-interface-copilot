@@ -366,7 +366,7 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(friend_client.reads, 4)
             self.assertEqual(scheduler.progress.count("friend_feed"), 1)
 
-    def test_friend_care_accepts_inventory_decrease_when_friend_state_is_stale(self) -> None:
+    def test_friend_care_does_not_accept_inventory_decrease_when_friend_state_is_stale(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             store = ConfigStore(root / "config.yaml")
@@ -411,10 +411,12 @@ class ProgressAndSchedulerTests(unittest.TestCase):
                 client_factory=lambda _config: friend_client,
             )
             self.assertEqual(
-                scheduler._run_friend_care_if_due(own_client, config), "friend_feed"
+                scheduler._run_friend_care_if_due(own_client, config),
+                "friend_feed_pending",
             )
             self.assertEqual(friend_client.feed_calls, 1)
-            self.assertEqual(scheduler.progress.count("friend_feed"), 1)
+            self.assertEqual(own_client.reads, 0)
+            self.assertEqual(scheduler.progress.count("friend_feed"), 0)
 
     def test_employed_recall_waits_for_best_split_and_counts_once(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
