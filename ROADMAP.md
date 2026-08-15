@@ -18,7 +18,7 @@
 
 ### 致谢
 
-特别感谢用户 **QQ云** 提出 ICQQ 方向的建议。该方案为项目从“依赖模拟器中的官方 Android QQ”进一步探索“独立 QQ 协议后端”提供了新的技术路线，后续版本会围绕这一方向开展验证。
+特别感谢用户 **QQ用户圆** 提出 ICQQ 方向的建议。该方案为项目从“依赖模拟器中的官方 Android QQ”进一步探索“独立 QQ 协议后端”提供了新的技术路线，后续版本会围绕这一方向开展验证。
 
 ---
 
@@ -48,7 +48,7 @@
 
 ## English Summary
 
-The next version will investigate **ICQQ as an alternative QQ protocol backend**, with a focus on session reuse, SSO/raw OIDB transport, signing integration, and compatibility with the existing QQ Pet protocol layer. Special thanks to **QQ云** for proposing this direction.
+The next version will investigate **ICQQ as an alternative QQ protocol backend**, with a focus on session reuse, SSO/raw OIDB transport, signing integration, and compatibility with the existing QQ Pet protocol layer. Special thanks to **QQ用户圆** for proposing this direction.
 
 Due to repeated unauthorized copying, repackaging and paid resale of this project on second-hand marketplaces such as Xianyu, future development will substantially reduce the amount of newly developed core source code published publicly. Where licensing permits, future releases are expected to focus on protected Windows executable distributions while keeping public documentation, research results and selected components on GitHub.
 
