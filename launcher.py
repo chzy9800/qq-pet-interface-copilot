@@ -7,7 +7,7 @@ import sys
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from qqpet_app import __version__
 from qqpet_app.bootstrap import ensure_vc_runtime
@@ -60,13 +60,33 @@ def _configured_identity(store: ConfigStore) -> tuple[str, str]:
     return uin, pet_id
 
 
+def save_manual_connection(store: ConfigStore, adb_path: str, adb_serial: str) -> None:
+    """Persist launcher connection overrides; blank values keep auto discovery."""
+    path_text = os.path.expandvars(adb_path.strip().strip('"'))
+    if path_text and not Path(path_text).is_file():
+        raise ValueError("手动指定的 ADB 程序不存在，请选择 MuMu 目录中的 adb.exe")
+    serial = adb_serial.strip()
+    if serial and not (
+        serial.startswith("emulator-")
+        or (":" in serial and serial.rsplit(":", 1)[1].isdigit())
+    ):
+        raise ValueError("模拟器连接地址格式不正确，例如：127.0.0.1:16384")
+    config = store.data
+    config["mobile_protocol"]["adb_path"] = path_text
+    config["mobile_protocol"]["adb_serial"] = serial
+    store.save(config)
+
+
 class Launcher(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("QQ 宠物助手 · 一键启动")
-        self.geometry("620x460")
-        self.minsize(560, 420)
+        self.geometry("720x590")
+        self.minsize(640, 540)
         self.store = ConfigStore(CONFIG_PATH)
+        mobile = self.store.data["mobile_protocol"]
+        self.adb_path_var = tk.StringVar(value=str(mobile.get("adb_path") or ""))
+        self.adb_serial_var = tk.StringVar(value=str(mobile.get("adb_serial") or ""))
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.running = False
         self._build()
@@ -86,6 +106,30 @@ class Launcher(tk.Tk):
         ttk.Label(body, textvariable=self.state_var, font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w")
         self.progress = ttk.Progressbar(body, mode="indeterminate")
         self.progress.pack(fill=tk.X, pady=(10, 14))
+
+        connection = ttk.LabelFrame(body, text="模拟器连接（留空自动识别）", padding=10)
+        connection.pack(fill=tk.X, pady=(0, 12))
+        connection.columnconfigure(1, weight=1)
+        ttk.Label(connection, text="ADB 程序").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(connection, textvariable=self.adb_path_var).grid(
+            row=0, column=1, sticky="ew", pady=3
+        )
+        ttk.Button(connection, text="选择…", command=self._browse_adb).grid(
+            row=0, column=2, padx=(8, 0), pady=3
+        )
+        ttk.Label(connection, text="连接地址").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=3)
+        ttk.Entry(connection, textvariable=self.adb_serial_var).grid(
+            row=1, column=1, sticky="ew", pady=3
+        )
+        ttk.Button(connection, text="恢复自动", command=self._clear_manual_connection).grid(
+            row=1, column=2, padx=(8, 0), pady=3
+        )
+        ttk.Label(
+            connection,
+            text="示例：ADB 程序选择 …\\MuMu Player 12\\nx_main\\adb.exe；连接地址填写 127.0.0.1:16384",
+            foreground="#666",
+        ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(5, 0))
+
         self.log = tk.Text(body, height=11, state=tk.DISABLED, wrap=tk.WORD)
         self.log.pack(fill=tk.BOTH, expand=True)
         actions = ttk.Frame(body)
@@ -116,10 +160,37 @@ class Launcher(tk.Tk):
         self.install_button.configure(state=tk.DISABLED)
         threading.Thread(target=target, daemon=True).start()
 
+    def _browse_adb(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="选择 MuMu 的 adb.exe",
+            filetypes=(("ADB 程序", "adb.exe"), ("可执行程序", "*.exe")),
+        )
+        if selected:
+            self.adb_path_var.set(selected)
+
+    def _clear_manual_connection(self) -> None:
+        self.adb_path_var.set("")
+        self.adb_serial_var.set("")
+
+    def _save_connection_fields(self) -> bool:
+        try:
+            save_manual_connection(
+                self.store, self.adb_path_var.get(), self.adb_serial_var.get()
+            )
+            return True
+        except ValueError as exc:
+            self.state_var.set("连接设置有误")
+            messagebox.showerror("无法保存连接设置", str(exc))
+            return False
+
     def connect(self) -> None:
+        if not self._save_connection_fields():
+            return
         self._run(self._connect_worker)
 
     def install_mobile_runtime(self) -> None:
+        if not self._save_connection_fields():
+            return
         self._run(self._install_worker)
 
     def check_update(self) -> None:

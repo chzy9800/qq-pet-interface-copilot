@@ -110,6 +110,10 @@ rpc.exports = {
     return { ok: true, process: 'com.tencent.mobileqq' };
   },
 
+  javaReady() {
+    return typeof Java !== 'undefined' && Java.available === true;
+  },
+
   getSelfUin() {
     return new Promise((resolve, reject) => {
       Java.perform(() => {
