@@ -1,11 +1,41 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import launcher
 
 
 class LauncherTests(unittest.TestCase):
+    def test_manual_connection_is_saved_and_blank_values_restore_auto_mode(self) -> None:
+        class Store:
+            data = {"mobile_protocol": {"adb_path": "old", "adb_serial": "old"}}
+
+            def save(self, value):
+                self.data = value
+
+        store = Store()
+        with TemporaryDirectory() as temporary:
+            adb = Path(temporary) / "adb.exe"
+            adb.touch()
+            launcher.save_manual_connection(store, str(adb), "127.0.0.1:16384")
+            self.assertEqual(store.data["mobile_protocol"]["adb_path"], str(adb))
+            self.assertEqual(store.data["mobile_protocol"]["adb_serial"], "127.0.0.1:16384")
+            launcher.save_manual_connection(store, "", "")
+            self.assertEqual(store.data["mobile_protocol"]["adb_path"], "")
+            self.assertEqual(store.data["mobile_protocol"]["adb_serial"], "")
+
+    def test_manual_connection_rejects_invalid_address(self) -> None:
+        class Store:
+            data = {"mobile_protocol": {"adb_path": "", "adb_serial": ""}}
+
+            def save(self, value):
+                self.data = value
+
+        with self.assertRaisesRegex(ValueError, "格式不正确"):
+            launcher.save_manual_connection(Store(), "", "127.0.0.1")
+
     def test_frozen_console_child_uses_independent_pyinstaller_environment(self) -> None:
         command, environment = launcher.console_process_spec(frozen=True)
         self.assertEqual(command, [launcher.sys.executable, "--console"])

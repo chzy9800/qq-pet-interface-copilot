@@ -3,12 +3,13 @@
 from PyInstaller.utils.hooks import collect_data_files
 
 frida_tools_data = collect_data_files("frida_tools", includes=["bridges/java.js"])
+frida_java_fallback = [(source, "hooks") for source, _destination in frida_tools_data]
 
 a = Analysis(
     ["launcher.py"],
     pathex=[],
     binaries=[],
-    datas=[("hooks/qqpet_mobile_read_agent.js", "hooks")] + frida_tools_data,
+    datas=[("hooks/qqpet_mobile_read_agent.js", "hooks")] + frida_tools_data + frida_java_fallback,
     hiddenimports=[
         "encodings.idna",
         "main",
