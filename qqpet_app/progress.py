@@ -42,6 +42,7 @@ class DailyProgress:
                 "optimizer": {"active_minutes": 0, "opening_gold": None},
                 "economy_profile": {},
                 "work_hire_unavailable_uins": [],
+                "rotation": {"last_school_attribute": None},
             }
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -59,6 +60,7 @@ class DailyProgress:
                 "optimizer": {"active_minutes": 0, "opening_gold": None},
                 "economy_profile": {},
                 "work_hire_unavailable_uins": [],
+                "rotation": {"last_school_attribute": None},
             }
         loaded.setdefault("history", [])
         loaded.setdefault("pending", None)
@@ -68,6 +70,7 @@ class DailyProgress:
         loaded.setdefault("optimizer", {"active_minutes": 0, "opening_gold": None})
         loaded.setdefault("economy_profile", {})
         loaded.setdefault("work_hire_unavailable_uins", [])
+        loaded.setdefault("rotation", {"last_school_attribute": None})
         loaded["counts"] = {**EMPTY_COUNTS, **loaded.get("counts", {})}
         return loaded
 
@@ -100,6 +103,7 @@ class DailyProgress:
                     "encouraged_story_ids": [],
                     "optimizer": {"active_minutes": 0, "opening_gold": None},
                     "work_hire_unavailable_uins": [],
+                    "rotation": {"last_school_attribute": None},
                 }
             )
             self._save()
@@ -169,6 +173,21 @@ class DailyProgress:
             for value in self.snapshot().get("work_hire_unavailable_uins", [])
             if str(value)
         }
+
+    def last_school_attribute(self) -> str | None:
+        value = self.snapshot().get("rotation", {}).get("last_school_attribute")
+        return str(value) if value else None
+
+    def record_last_school_attribute(self, attribute: str) -> None:
+        if not attribute:
+            return
+        with self._lock:
+            self.rollover()
+            rotation = self._state.setdefault(
+                "rotation", {"last_school_attribute": None}
+            )
+            rotation["last_school_attribute"] = str(attribute)
+            self._save()
 
     def mark_work_hire_unavailable(self, uin: str) -> None:
         value = str(uin).strip()

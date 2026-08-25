@@ -1069,6 +1069,72 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             scheduler.progress.increment("work")
             self.assertIsNone(scheduler.decide(config, rich, now))
 
+    def test_rotation_keeps_school_and_work_counts_balanced(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["adventure"]["enabled"] = False
+            config["scheduler"]["rotation_enabled"] = True
+            config["scheduler"]["rotation_gap"] = 3
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            rich = PetValues(gold=1000)
+            now = datetime(2026, 8, 2, 12, 0)
+            self.assertEqual(scheduler.decide(config, rich, now), "school")
+            scheduler.progress.increment("school", 3)
+            self.assertEqual(scheduler.decide(config, rich, now), "work")
+            scheduler.progress.increment("work", 2)
+            self.assertEqual(scheduler.decide(config, rich, now), "school")
+            scheduler.progress.increment("school", 2)
+            self.assertEqual(scheduler.decide(config, rich, now), "work")
+
+    def test_rotation_gap_respects_daily_limits(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["adventure"]["enabled"] = False
+            config["scheduler"]["rotation_enabled"] = True
+            config["scheduler"]["rotation_gap"] = 1
+            config["school"]["limit_enabled"] = True
+            config["school"]["times_per_day"] = 4
+            config["work"]["limit_enabled"] = True
+            config["work"]["times_per_day"] = 1
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            rich = PetValues(gold=1000)
+            now = datetime(2026, 8, 2, 12, 0)
+            scheduler.progress.increment("school", 3)
+            scheduler.progress.increment("work")
+            self.assertEqual(scheduler.decide(config, rich, now), "school")
+            scheduler.progress.increment("school")
+            self.assertIsNone(scheduler.decide(config, rich, now))
+
+    def test_school_attribute_rotation_cycles_all_subjects(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            seen = [scheduler._next_school_attribute() for _ in range(4)]
+            self.assertEqual(
+                seen,
+                ["culture", "physical", "art", "culture"],
+            )
+            self.assertEqual(
+                scheduler.progress.last_school_attribute(), "culture"
+            )
+
+    def test_school_attribute_rotation_persists_across_instances(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            first = Scheduler(root / "config.yaml", root / "progress.json")
+            first._next_school_attribute()
+            first._next_school_attribute()
+            second = Scheduler(root / "config.yaml", root / "progress.json")
+            self.assertEqual(second._next_school_attribute(), "art")
+            self.assertEqual(second.progress.last_school_attribute(), "art")
+
     def test_legacy_work_limit_is_migrated_but_school_stays_unlimited(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "config.yaml"
@@ -1172,6 +1238,93 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(scheduler.run_once(), "school")
             self.assertEqual(fake.started, ("school", "physical"))
             self.assertEqual(scheduler.progress.snapshot()["pending"]["kind"], "school")
+
+    def test_run_once_uses_rotated_school_attribute_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["adventure"]["enabled"] = False
+            config["school"]["attribute_rotation"] = True
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            store.save(config)
+
+            class FakeClient:
+                started: list[str] = []
+
+                def query_values(self):
+                    return PetValues(gold=1000, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+                def start_school(self, option, preferred_sub_event=0):
+                    self.started.append(option)
+                    return SchoolStartResult(
+                        SchoolCourse("课程", 6115004, "奖励", "30分钟", can_do=True),
+                        "6100_rotated",
+                    )
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "school")
+            scheduler.progress.clear_pending()
+            self.assertEqual(scheduler.run_once(), "school")
+            self.assertEqual(fake.started, ["culture", "physical"])
+            self.assertEqual(scheduler.progress.last_school_attribute(), "physical")
+
+    def test_run_once_rotates_school_attribute_when_course_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["adventure"]["enabled"] = False
+            config["school"]["attribute_rotation"] = True
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            store.save(config)
+
+            class FakeClient:
+                started: list[str] = []
+
+                def query_values(self):
+                    return PetValues(gold=1000, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+                def start_school(self, option, preferred_sub_event=0):
+                    if option == "culture":
+                        raise QQPetError("当前学习阶段暂无可用的智力课程")
+                    self.started.append(option)
+                    return SchoolStartResult(
+                        SchoolCourse("课程", 6115004, "奖励", "30分钟", can_do=True),
+                        "6100_fallback",
+                    )
+
+            fake = FakeClient()
+            logs: list[str] = []
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                log=logs.append,
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "school")
+            self.assertEqual(fake.started, ["physical"])
+            self.assertEqual(scheduler.progress.last_school_attribute(), "physical")
+            self.assertTrue(any("自动切换到下一门科目" in line for line in logs))
 
     def test_empty_start_response_waits_for_story_instead_of_resending(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

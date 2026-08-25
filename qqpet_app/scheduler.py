@@ -41,6 +41,13 @@ LogCallback = Callable[[str], None]
 StatusCallback = Callable[[PetValues | None, StoryStatus | None, dict], None]
 ActivityCallback = Callable[[str], None]
 
+SCHOOL_ATTRIBUTE_CYCLE = ("culture", "physical", "art")
+ATTRIBUTE_NAMES = {
+    "culture": "智力",
+    "physical": "力量",
+    "art": "魅力",
+}
+
 
 class Scheduler:
     def __init__(
@@ -145,6 +152,17 @@ class Scheduler:
             "employed": "被雇佣任务",
             "pk": "PK",
         }.get(kind or "", "任务")
+
+    def _next_school_attribute(self) -> str:
+        """Advance the study-attribute rotation and persist the chosen subject."""
+        last = self.progress.last_school_attribute()
+        cycle = SCHOOL_ATTRIBUTE_CYCLE
+        if last not in cycle:
+            chosen = cycle[0]
+        else:
+            chosen = cycle[(cycle.index(last) + 1) % len(cycle)]
+        self.progress.record_last_school_attribute(chosen)
+        return chosen
 
     def _run_pk_if_due(
         self,
@@ -484,11 +502,22 @@ class Scheduler:
         if adventure["enabled"] and due and (adventure_limit == 0 or counts["adventure"] < adventure_limit):
             return "adventure"
 
-        if values.gold >= float(config["scheduler"]["coin_threshold"]):
-            if self._under_limit(config, counts, "school"):
+        school_ok = self._under_limit(config, counts, "school")
+        work_ok = self._under_limit(config, counts, "work")
+        scheduler_cfg = config["scheduler"]
+        if school_ok and work_ok and scheduler_cfg.get("rotation_enabled", False):
+            allowed_gap = max(0, int(scheduler_cfg.get("rotation_gap", 3)))
+            gap = int(counts["school"]) - int(counts["work"])
+            if gap >= allowed_gap:
+                return "work"
+            if gap <= -allowed_gap:
                 return "school"
-            return "work" if self._under_limit(config, counts, "work") else None
-        return "work" if self._under_limit(config, counts, "work") else None
+
+        if values.gold >= float(scheduler_cfg["coin_threshold"]):
+            if school_ok:
+                return "school"
+            return "work" if work_ok else None
+        return "work" if work_ok else None
 
     def _adaptive_decision(
         self, client: NapCatClient, config: dict, values: PetValues
@@ -1474,6 +1503,13 @@ class Scheduler:
                 if adaptive and adaptive.course_sub_event
                 else int(config["school"].get("course_sub_event", 0))
             )
+            rotation_enabled = (
+                bool(config["school"].get("attribute_rotation", False))
+                and not preferred_course
+            )
+            if rotation_enabled:
+                option = self._next_school_attribute()
+                self.log(f"科目轮换：本轮学习{ATTRIBUTE_NAMES.get(option, option)}")
             try:
                 result = client.start_school(option, preferred_course)
             except (QQPetEmptyResponse, QQPetConnectionError) as exc:
@@ -1486,6 +1522,16 @@ class Scheduler:
                 )
                 self.activity("开课结果待确认，正在等待服务器状态")
                 return action
+            except QQPetError as exc:
+                if not (rotation_enabled and "暂无可用" in str(exc)):
+                    raise
+                subject_name = ATTRIBUTE_NAMES.get(option, option)
+                self.log(
+                    f"当前学习阶段暂无可用的{subject_name}课程，"
+                    "已自动切换到下一门科目重新选择"
+                )
+                option = self._next_school_attribute()
+                result = client.start_school(option, preferred_course)
             course = result.course
             self.progress.set_pending(
                 "school",

@@ -63,9 +63,12 @@ SETTING_FIELDS = [
     ("account.pet_id", "宠物 ID", str),
     ("scheduler.interval_seconds", "轮询间隔（秒）", int),
     ("scheduler.coin_threshold", "学习金币阈值", float),
+    ("scheduler.rotation_enabled", "学习/打工均衡轮换（避免工分失衡）", bool),
+    ("scheduler.rotation_gap", "学习与打工次数差上限（落后此值强制补齐）", int),
     ("optimization.enabled", "测试：启用动态数学模型调度（关闭时使用原调度）", bool),
     ("school.enabled", "启用学习", bool),
-    ("school.attribute", "学习属性 culture/physical/art", str),
+    ("school.attribute", "学习科目", str),
+    ("school.attribute_rotation", "学习科目循环轮换（力量→智力→魅力，避免偏科）", bool),
     ("school.limit_enabled", "限制每日学习次数（关闭=不限）", bool),
     ("school.times_per_day", "每日最大学习次数", int),
     ("work.enabled", "启用打工", bool),
@@ -163,6 +166,11 @@ CHOICE_FIELDS = {
     "friend_care.bath_item": {
         "香皂片": "soap",
         "沐浴球": "bath_ball",
+    },
+    "school.attribute": {
+        "力量（体力）": "physical",
+        "智力（文化）": "culture",
+        "魅力（艺术）": "art",
     },
     "work.hire_mode": {
         "自动选择可用好友": "auto",
@@ -627,6 +635,26 @@ class MainWindow(tk.Tk):
                 )
             self.setting_vars[path] = (variable, value_type)
             section_rows[key] += 1
+
+        scheduler_section = section_frames["scheduler"]
+        ttk.Label(
+            scheduler_section,
+            text=(
+                "学习/打工均衡轮换：当学习与打工次数差达到上限时，强制补齐落后一方；"
+                "次数接近时仍按金币阈值优先学习。配合“学习科目循环轮换”可同时避免偏科。"
+            ),
+            foreground="#666",
+            wraplength=700,
+            justify=tk.LEFT,
+        ).grid(
+            row=section_rows["scheduler"],
+            column=0,
+            columnspan=2,
+            sticky="w",
+            padx=6,
+            pady=(2, 8),
+        )
+        section_rows["scheduler"] += 1
 
         optimization_section = section_frames["optimization"]
         ttk.Label(

@@ -23,14 +23,17 @@
   },
   "scheduler": {
     "interval_seconds": 15,
-    "coin_threshold": 500
+    "coin_threshold": 500,
+    "rotation_enabled": false,
+    "rotation_gap": 3
   },
   "school": {
     "enabled": true,
     "attribute": "physical",
     "course_sub_event": 0,
     "limit_enabled": false,
-    "times_per_day": 20
+    "times_per_day": 20,
+    "attribute_rotation": false
   },
   "work": {
     "enabled": true,

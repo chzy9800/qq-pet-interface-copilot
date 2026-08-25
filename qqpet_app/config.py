@@ -32,6 +32,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "scheduler": {
         "interval_seconds": 15,
         "coin_threshold": 500,
+        "rotation_enabled": False,
+        "rotation_gap": 3,
     },
     "optimization": {
         "enabled": False,
@@ -53,6 +55,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "course_sub_event": 0,
         "limit_enabled": False,
         "times_per_day": 20,
+        "attribute_rotation": False,
     },
     "work": {
         "enabled": True,
@@ -257,6 +260,8 @@ class ConfigStore:
             raise ValueError("school.attribute 必须是 culture/physical/art")
         if int(config["school"].get("course_sub_event", 0)) < 0:
             raise ValueError("school.course_sub_event 不能小于 0")
+        if int(config["scheduler"].get("rotation_gap", 3)) < 0:
+            raise ValueError("scheduler.rotation_gap 不能小于 0")
         school_limit = int(config["school"].get("times_per_day", 0))
         if school_limit < 0:
             raise ValueError("school.times_per_day 不能小于 0")
