@@ -290,6 +290,8 @@ class MainWindow(tk.Tk):
                 "clean", "story", "counts", "pk", "friend_visits", "friend_care",
             )
         }
+        # 今日任务进度条（学习/打工/冒险/PK），key -> ttk.Progressbar
+        self.daily_bars: dict[str, ttk.Progressbar] = {}
         self._build_ui()
         self.bind_all("<MouseWheel>", self._route_mousewheel, add="+")
         self.after_idle(self._maximize_window)
@@ -465,6 +467,7 @@ class MainWindow(tk.Tk):
         self._status_row(left, "自动 PK", "pk", small=True)
         self._status_row(left, "好友访问", "friend_visits", small=True)
         self._status_row(left, "好友照顾", "friend_care", small=True)
+        self._build_daily_progress_section(left)
 
         buttons = ttk.Frame(left)
         buttons.pack(fill=tk.X, pady=(22, 0))
@@ -1124,6 +1127,61 @@ class MainWindow(tk.Tk):
         ttk.Label(frame, text=title, width=10).pack(side=tk.LEFT)
         style = "Title.TLabel" if small else "Value.TLabel"
         ttk.Label(frame, textvariable=self.status_vars[key], style=style).pack(side=tk.RIGHT)
+
+    def _build_daily_progress_section(self, parent: ttk.Frame) -> None:
+        """今日任务进度卡片：学习/打工/冒险/PK 相对每日上限的进度条。
+
+        上限来自 config（school/work/adventure.times_per_day、pk.max_per_day），
+        运行时在状态刷新时动态设置 maximum，避免依赖加载顺序。
+        """
+        ttk.Label(parent, text="今日任务进度", style="Title.TLabel").pack(
+            anchor="w", pady=(14, 8)
+        )
+        card = ttk.Frame(parent, style="Card.TFrame", padding=12)
+        card.pack(fill=tk.X)
+        spec = (
+            ("school", "学习", "school", "times_per_day"),
+            ("work", "打工", "work", "times_per_day"),
+            ("adventure", "冒险", "adventure", "times_per_day"),
+            ("pk", "PK", "pk", "max_per_day"),
+        )
+        for key, label, section, field in spec:
+            row = ttk.Frame(card, style="Card.TFrame")
+            row.pack(fill=tk.X, pady=(2, 4))
+            ttk.Label(row, text=label, width=8, style="Card.TLabel").pack(side=tk.LEFT)
+            bar = ttk.Progressbar(row, maximum=1, value=0, length=150)
+            bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+            text = tk.StringVar(value="0/0")
+            ttk.Label(row, textvariable=text, width=9, anchor="e", style="Card.TLabel").pack(
+                side=tk.RIGHT
+            )
+            self.daily_bars[key] = bar
+            self.daily_bars[key + "_text"] = text
+            self.daily_bars[key + "_cfg"] = (section, field)
+        self.daily_bars["_labels"] = spec
+
+    @staticmethod
+    def _daily_bounds(count: int, limit: int) -> tuple[int, int, str]:
+        """返回 (maximum, value, 文字)。limit<=0 表示不限次数，进度条按已完成占满。"""
+        count = max(0, int(count or 0))
+        limit = int(limit or 0)
+        if limit <= 0:
+            return (max(1, count), count, f"{count}/∞")
+        display = min(count, limit)
+        return (limit, display, f"{display}/{limit}")
+
+    def _update_daily_progress(self, counts: dict, config: dict) -> None:
+        """用进度对象实际值填充每个任务的进度条与计数文本。"""
+        for key, _label, cfg_section, cfg_field in self.daily_bars.get("_labels", ()):
+            count = int(counts.get(key, 0) or 0)
+            limit = int(config.get(cfg_section, {}).get(cfg_field, 0) or 0)
+            bar = self.daily_bars.get(key)
+            text = self.daily_bars.get(key + "_text")
+            if bar is None or text is None:
+                continue
+            maximum, value, label = self._daily_bounds(count, limit)
+            bar.configure(maximum=maximum, value=value)
+            text.set(label)
 
     def _build_manual_pk_page(self, parent: ttk.Frame) -> None:
         ttk.Label(parent, text="手动 PK 专区", style="Title.TLabel").grid(
@@ -2511,6 +2569,7 @@ class MainWindow(tk.Tk):
                         f"学{counts['school']} 工{counts['work']} "
                         f"冒{counts['adventure']} PK{counts.get('pk', 0)}"
                     )
+                    self._update_daily_progress(counts, self.config_store.data)
                     pk_summary = state.get("pk_summary", {})
                     pool_status = pk_summary.get("friend_pool_status")
                     pool_text = {
