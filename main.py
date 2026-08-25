@@ -292,6 +292,8 @@ class MainWindow(tk.Tk):
         }
         # 今日任务进度条（学习/打工/冒险/PK），key -> ttk.Progressbar
         self.daily_bars: dict[str, ttk.Progressbar] = {}
+        # 运行日志是否跟随自动滚动；关闭后追加日志不会把视图拉到底部
+        self.log_autoscroll = tk.BooleanVar(value=True)
         self._build_ui()
         self.bind_all("<MouseWheel>", self._route_mousewheel, add="+")
         self.after_idle(self._maximize_window)
@@ -520,6 +522,15 @@ class MainWindow(tk.Tk):
         self.log_text.configure(yscrollcommand=log_scroll.set)
         self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_toolbar = ttk.Frame(log_page, padding=(0, 0, 0, 6))
+        self.log_toolbar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.log_autoscroll_check = ttk.Checkbutton(
+            self.log_toolbar,
+            text="自动滚动新日志",
+            variable=self.log_autoscroll,
+            command=self._on_log_autoscroll_toggle,
+        )
+        self.log_autoscroll_check.pack(side=tk.LEFT)
 
         self._build_manual_pk_page(manual_pk_page)
         self._build_friend_care_page(friend_care_page)
@@ -2949,11 +2960,17 @@ class MainWindow(tk.Tk):
     def _append_log(self, line: str) -> None:
         self.log_text.configure(state=tk.NORMAL)
         self.log_text.insert(tk.END, line + "\n")
-        self.log_text.see(tk.END)
+        if self.log_autoscroll.get():
+            self.log_text.see(tk.END)
         self.log_text.configure(state=tk.DISABLED)
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         with (LOG_DIR / f"{datetime.now():%Y-%m-%d}.log").open("a", encoding="utf-8") as stream:
             stream.write(line + "\n")
+
+    def _on_log_autoscroll_toggle(self) -> None:
+        """重新开启自动滚动时立即回到日志底部，避免停在旧位置。"""
+        if self.log_autoscroll.get():
+            self.log_text.see(tk.END)
 
     def _close(self) -> None:
         self._stop()
