@@ -545,13 +545,6 @@ class Scheduler:
         school_ok = self._under_limit(config, counts, "school")
         work_ok = self._under_limit(config, counts, "work")
         scheduler_cfg = config["scheduler"]
-        if school_ok and work_ok and scheduler_cfg.get("rotation_enabled", False):
-            allowed_gap = max(0, int(scheduler_cfg.get("rotation_gap", 3)))
-            gap = int(counts["school"]) - int(counts["work"])
-            if gap >= allowed_gap:
-                return "work"
-            if gap <= -allowed_gap:
-                return "school"
 
         if values.gold >= float(scheduler_cfg["coin_threshold"]):
             if school_ok:

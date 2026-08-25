@@ -63,8 +63,6 @@ SETTING_FIELDS = [
     ("account.pet_id", "宠物 ID", str),
     ("scheduler.interval_seconds", "轮询间隔（秒）", int),
     ("scheduler.coin_threshold", "学习金币阈值", float),
-    ("scheduler.rotation_enabled", "学习/打工均衡轮换（避免工分失衡）", bool),
-    ("scheduler.rotation_gap", "学习与打工次数差上限（落后此值强制补齐）", int),
     ("optimization.enabled", "测试：启用动态数学模型调度（关闭时使用原调度）", bool),
     ("school.enabled", "启用学习", bool),
     ("school.attribute", "学习科目", str),
@@ -654,10 +652,7 @@ class MainWindow(tk.Tk):
         scheduler_section = section_frames["scheduler"]
         ttk.Label(
             scheduler_section,
-            text=(
-                "学习/打工均衡轮换：当学习与打工次数差达到上限时，强制补齐落后一方；"
-                "次数接近时仍按金币阈值优先学习。配合“学习科目循环轮换”可同时避免偏科。"
-            ),
+            text="金币充足时优先学习，否则尝试打工；可配合“学习科目循环轮换”避免偏科。",
             foreground="#666",
             wraplength=700,
             justify=tk.LEFT,

@@ -23,9 +23,7 @@
   },
   "scheduler": {
     "interval_seconds": 15,
-    "coin_threshold": 500,
-    "rotation_enabled": false,
-    "rotation_gap": 3
+    "coin_threshold": 500
   },
   "school": {
     "enabled": true,

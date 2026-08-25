@@ -1132,48 +1132,6 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             scheduler.progress.increment("work")
             self.assertIsNone(scheduler.decide(config, rich, now))
 
-    def test_rotation_keeps_school_and_work_counts_balanced(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            store = ConfigStore(root / "config.yaml")
-            config = store.data
-            config["adventure"]["enabled"] = False
-            config["scheduler"]["rotation_enabled"] = True
-            config["scheduler"]["rotation_gap"] = 3
-            store.save(config)
-            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
-            rich = PetValues(gold=1000)
-            now = datetime(2026, 8, 2, 12, 0)
-            self.assertEqual(scheduler.decide(config, rich, now), "school")
-            scheduler.progress.increment("school", 3)
-            self.assertEqual(scheduler.decide(config, rich, now), "work")
-            scheduler.progress.increment("work", 2)
-            self.assertEqual(scheduler.decide(config, rich, now), "school")
-            scheduler.progress.increment("school", 2)
-            self.assertEqual(scheduler.decide(config, rich, now), "work")
-
-    def test_rotation_gap_respects_daily_limits(self) -> None:
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            store = ConfigStore(root / "config.yaml")
-            config = store.data
-            config["adventure"]["enabled"] = False
-            config["scheduler"]["rotation_enabled"] = True
-            config["scheduler"]["rotation_gap"] = 1
-            config["school"]["limit_enabled"] = True
-            config["school"]["times_per_day"] = 4
-            config["work"]["limit_enabled"] = True
-            config["work"]["times_per_day"] = 1
-            store.save(config)
-            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
-            rich = PetValues(gold=1000)
-            now = datetime(2026, 8, 2, 12, 0)
-            scheduler.progress.increment("school", 3)
-            scheduler.progress.increment("work")
-            self.assertEqual(scheduler.decide(config, rich, now), "school")
-            scheduler.progress.increment("school")
-            self.assertIsNone(scheduler.decide(config, rich, now))
-
     def test_school_attribute_rotation_cycles_all_subjects(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
