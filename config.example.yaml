@@ -68,7 +68,8 @@
     "minimum_hunger": 80,
     "minimum_clean": 80,
     "wait_seconds": 9,
-    "retry_cooldown_seconds": 300
+    "retry_cooldown_seconds": 300,
+    "catch_up_minutes": 0
   },
   "friend_visits": {
     "enabled": false,

@@ -709,6 +709,69 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertIsNone(result)
             self.assertFalse(scheduler.pk_progress.daily_run_started())
 
+    def test_auto_pk_catches_up_within_configured_window(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["pk"].update(
+                {"enabled": True, "start_time": "21:00", "catch_up_minutes": 30}
+            )
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            # The batch is missed at 21:00 and the app starts at 21:20; the
+            # configured 30-minute window should still arm it.
+            result = scheduler._run_pk_if_due(
+                object(),
+                config,
+                PetValues(hunger=100, clean=100),
+                datetime(2026, 8, 12, 21, 20),
+            )
+            self.assertEqual(result, "pk")
+            self.assertTrue(scheduler.pk_progress.daily_run_started())
+
+    def test_auto_pk_does_not_catch_up_outside_window(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["pk"].update(
+                {"enabled": True, "start_time": "21:00", "catch_up_minutes": 30}
+            )
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            # 90 minutes past the scheduled minute is outside the 30-minute
+            # window, so it must not arm today.
+            result = scheduler._run_pk_if_due(
+                object(),
+                config,
+                PetValues(hunger=100, clean=100),
+                datetime(2026, 8, 12, 22, 30),
+            )
+            self.assertIsNone(result)
+            self.assertFalse(scheduler.pk_progress.daily_run_started())
+
+    def test_auto_pk_catch_up_window_crosses_midnight(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["pk"].update(
+                {"enabled": True, "start_time": "23:50", "catch_up_minutes": 30}
+            )
+            store.save(config)
+            scheduler = Scheduler(root / "config.yaml", root / "progress.json")
+            # A 23:50 start with a 30-minute window still arms the following
+            # morning just after midnight (00:05 next day).
+            result = scheduler._run_pk_if_due(
+                object(),
+                config,
+                PetValues(hunger=100, clean=100),
+                datetime(2026, 8, 13, 0, 5),
+            )
+            self.assertEqual(result, "pk")
+            self.assertTrue(scheduler.pk_progress.daily_run_started())
+
     def test_auto_pk_runs_while_primary_story_is_active(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

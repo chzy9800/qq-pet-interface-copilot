@@ -95,6 +95,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "minimum_clean": 80,
         "wait_seconds": 9,
         "retry_cooldown_seconds": 300,
+        "catch_up_minutes": 0,
     },
     "friend_visits": {
         "enabled": False,
@@ -312,6 +313,7 @@ class ConfigStore:
             "wait_seconds",
             "retry_cooldown_seconds",
             "friend_refresh_seconds",
+            "catch_up_minutes",
         ):
             if float(config["pk"][key]) < 0:
                 raise ValueError(f"pk.{key} 不能小于 0")

@@ -5,7 +5,7 @@ import math
 import random
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -153,6 +153,43 @@ class Scheduler:
             "pk": "PK",
         }.get(kind or "", "任务")
 
+    @staticmethod
+    def _pk_armed_at(
+        pk: dict, now: datetime
+    ) -> tuple[datetime, datetime] | None:
+        """Return the (arm_start, arm_deadline) window in which the daily PK
+        batch may be armed, or None if `now` is outside it.
+
+        The default (`catch_up_minutes == 0`) preserves the historical
+        behaviour exactly: the batch arms only during the single configured
+        minute and never catches up when the app starts later that day.  When
+        a positive `catch_up_minutes` is set, a batch missed because the app
+        was not running at start_time may still start within that window.  A
+        late-night window that crosses midnight is also resolved against
+        yesterday's start_time so it still arms on the following morning.
+        """
+        start_time = str(pk.get("start_time", "")).strip()
+        catch_up_minutes = max(0, int(pk.get("catch_up_minutes", 0)))
+        try:
+            parsed = datetime.strptime(start_time, "%H:%M")
+        except (TypeError, ValueError):
+            return None
+        today_arm = now.replace(
+            hour=parsed.hour, minute=parsed.minute, second=0, microsecond=0
+        )
+        if catch_up_minutes <= 0:
+            # Exact configured minute, matching the historical behaviour.
+            window = timedelta(minutes=1)
+            for arm in (today_arm, today_arm - timedelta(days=1)):
+                if arm <= now < arm + window:
+                    return arm, arm + window
+            return None
+        window = timedelta(minutes=catch_up_minutes)
+        for arm in (today_arm, today_arm - timedelta(days=1)):
+            if arm <= now < arm + window:
+                return arm, arm + window
+        return None
+
     def _next_school_attribute(self) -> str:
         """Advance the study-attribute rotation and persist the chosen subject."""
         last = self.progress.last_school_attribute()
@@ -179,10 +216,13 @@ class Scheduler:
             return None
         batch_started = self.pk_progress.daily_run_started()
         if not batch_started:
-            # Do not catch up simply because the application was opened after
-            # the configured time. The batch is armed only during that exact
-            # minute, then persisted so a legitimately started batch can resume.
-            if now.strftime("%H:%M") != str(pk["start_time"]):
+            # Arm the daily batch either during the exact configured minute or,
+            # when a catch-up window is configured, during the following
+            # catch_up_minutes. Without catch-up this keeps the historical
+            # behaviour of never starting a missed batch just because the app
+            # happened to be open later that day.
+            armed = self._pk_armed_at(pk, now)
+            if armed is None:
                 return None
             self.pk_progress.mark_daily_run_started()
         limit = int(pk["max_per_day"])

@@ -94,6 +94,7 @@ SETTING_FIELDS = [
     ("pk.only_weaker", "仅挑战战力低于自己的对手", bool),
     ("pk.minimum_hunger", "PK 最低体力", float),
     ("pk.minimum_clean", "PK 最低清洁", float),
+    ("pk.catch_up_minutes", "PK 错过补跑窗口（分钟，0=只在指定分钟开跑）", int),
     ("friend_visits.enabled", "启用每日好友访问", bool),
     ("friend_visits.start_time", "每日好友访问时间 HH:MM", str),
     ("friend_visits.max_per_day", "每日最多访问人数（0 不限）", int),
