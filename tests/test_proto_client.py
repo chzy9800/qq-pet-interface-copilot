@@ -162,6 +162,70 @@ class ProtoAndClientTests(unittest.TestCase):
             ["未达要求职业"],
         )
 
+    def test_shortest_duration_job_rotation_skips_last_job(self) -> None:
+        client = NapCatClient("http://unused", "token", "pet")
+        client.query_work_overview = lambda: WorkOverview(  # type: ignore[method-assign]
+            careers=(WorkCareer(1, "职业", available=True),)
+        )
+
+        def jobs(career_type: int, _hired_pet_id: str = ""):
+            return (
+                WorkJob(1, "职业", "岗位甲", 111, "金币 100", "1小时", can_do=True),
+                WorkJob(1, "职业", "岗位乙", 222, "金币 90", "1小时", can_do=True),
+                WorkJob(1, "职业", "岗位丙", 333, "金币 80", "2小时", can_do=True),
+            )
+
+        client.query_work_jobs = jobs  # type: ignore[method-assign]
+        first = client.select_work_job()
+        self.assertEqual(first.sub_event_type, 111)
+        second = client.select_work_job(rotation_exclude_sub_events=(111,))
+        self.assertEqual(second.sub_event_type, 222)
+        third = client.select_work_job(rotation_exclude_sub_events=(222,))
+        self.assertEqual(third.sub_event_type, 111)
+
+    def test_shortest_duration_job_rotation_keeps_single_shortest(self) -> None:
+        client = NapCatClient("http://unused", "token", "pet")
+        client.query_work_overview = lambda: WorkOverview(  # type: ignore[method-assign]
+            careers=(WorkCareer(1, "职业", available=True),)
+        )
+
+        def jobs(career_type: int, _hired_pet_id: str = ""):
+            return (
+                WorkJob(1, "职业", "唯一短岗", 111, "金币 60", "1小时", can_do=True),
+                WorkJob(1, "职业", "长时岗", 333, "金币 80", "2小时", can_do=True),
+            )
+
+        client.query_work_jobs = jobs  # type: ignore[method-assign]
+        first = client.select_work_job()
+        self.assertEqual(first.sub_event_type, 111)
+        second = client.select_work_job(rotation_exclude_sub_events=(111,))
+        self.assertEqual(second.sub_event_type, 111)
+
+    def test_start_work_rotates_shortest_duration_job(self) -> None:
+        client = NapCatClient("http://unused", "token", "pet")
+        client.query_work_overview = lambda: WorkOverview(  # type: ignore[method-assign]
+            careers=(WorkCareer(1, "职业", available=True),)
+        )
+
+        def jobs(career_type: int, _hired_pet_id: str = ""):
+            return (
+                WorkJob(1, "职业", "岗位甲", 111, "金币 100", "1小时", can_do=True),
+                WorkJob(1, "职业", "岗位乙", 222, "金币 90", "1小时", can_do=True),
+            )
+
+        client.query_work_jobs = jobs  # type: ignore[method-assign]
+        client.send_oidb = lambda *_args: OidbResponse(  # type: ignore[method-assign]
+            38750,
+            1,
+            0,
+            field_string(1, "6400_rotated"),
+            b"raw",
+        )
+        first = client.start_work()
+        self.assertEqual(first.job.sub_event_type, 111)
+        second = client.start_work(rotation_exclude_sub_events=(111,))
+        self.assertEqual(second.job.sub_event_type, 222)
+
     def test_http_packet_transport_explicitly_waits_for_response(self) -> None:
         client = NapCatClient("http://unused", "token", "pet")
         calls = []

@@ -1618,6 +1618,12 @@ class Scheduler:
                 else int(config["work"].get("job_sub_event", 0))
             )
             strategy = config["work"].get("strategy", "shortest_duration")
+            rotation_kwargs: dict = {}
+            if bool(config["work"].get("job_rotation", False)):
+                last_job = self.progress.last_work_job_sub_event()
+                if last_job:
+                    rotation_kwargs = {"rotation_exclude_sub_events": (last_job,)}
+                    self.log("岗位轮换：自动避开上次打工岗位，在并列最短时长岗位间切换")
             hired_friend = self._select_work_hire(client, config)
             hired_uin = hired_friend.user_id if hired_friend else ""
             hired_pet_id = hired_friend.pet_id if hired_friend else ""
@@ -1629,6 +1635,7 @@ class Scheduler:
                         preferred_job,
                         strategy,
                         hired_pet_id,
+                        **rotation_kwargs,
                     )
                 except QQPetError:
                     try:
@@ -1637,6 +1644,7 @@ class Scheduler:
                             0,
                             strategy,
                             hired_pet_id,
+                            **rotation_kwargs,
                         )
                     except WorkEligibilityError as exc:
                         cooldown = max(
@@ -1674,6 +1682,7 @@ class Scheduler:
                             strategy,
                             hired_uin,
                             hired_pet_id,
+                            **rotation_kwargs,
                         )
                         break
                     except WorkEligibilityError as exc:
@@ -1690,6 +1699,7 @@ class Scheduler:
                             strategy,
                             hired_pet_id,
                             tuple(rejected_jobs),
+                            **rotation_kwargs,
                         )
                         start_career = fallback.career_type
                         start_job = fallback.sub_event_type
@@ -1717,6 +1727,7 @@ class Scheduler:
                             strategy,
                             "",
                             "",
+                            **rotation_kwargs,
                         )
                         break
             except WorkEligibilityError as exc:
@@ -1740,6 +1751,8 @@ class Scheduler:
                 self.activity("开工结果待确认，正在等待服务器状态")
                 return action
             job = result.job
+            if bool(config["work"].get("job_rotation", False)):
+                self.progress.record_last_work_job_sub_event(job.sub_event_type)
             self.progress.set_pending(
                 "work",
                 duration_minutes=max(1, (job.duration_seconds + 59) // 60),

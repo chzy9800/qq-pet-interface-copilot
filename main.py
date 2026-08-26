@@ -72,6 +72,7 @@ SETTING_FIELDS = [
     ("work.enabled", "启用打工", bool),
     ("work.limit_enabled", "限制每日打工次数（关闭=不限）", bool),
     ("work.times_per_day", "每日最大打工次数", int),
+    ("work.job_rotation", "最短时长岗位轮换（避免总做同一岗位）", bool),
     ("work.employ_friend", "启用打工雇佣好友", bool),
     ("work.hire_mode", "雇佣方式", str),
     ("adventure.enabled", "启用冒险", bool),
@@ -786,6 +787,16 @@ class MainWindow(tk.Tk):
             text="选择“手动选择固定好友”时生效；仅显示服务器已确认拥有宠物的好友。",
             foreground="#666",
         ).grid(row=job_row + 3, column=1, sticky="w", padx=6, pady=(0, 5))
+        ttk.Label(
+            work_section,
+            text=(
+                "开启“最短时长岗位轮换”后，会在多个并列最短时长的岗位之间循环切换，"
+                "避免一直做同一个岗位；只有一个最短岗位时不轮换。"
+            ),
+            foreground="#666",
+            wraplength=700,
+            justify=tk.LEFT,
+        ).grid(row=job_row + 4, column=1, sticky="w", padx=6, pady=(0, 5))
         adventure_section = section_frames["adventure"]
         adventure_row = section_rows["adventure"]
         ttk.Label(adventure_section, text="服务器冒险选项").grid(

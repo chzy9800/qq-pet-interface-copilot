@@ -42,7 +42,10 @@ class DailyProgress:
                 "optimizer": {"active_minutes": 0, "opening_gold": None},
                 "economy_profile": {},
                 "work_hire_unavailable_uins": [],
-                "rotation": {"last_school_attribute": None},
+                "rotation": {
+                    "last_school_attribute": None,
+                    "last_work_job_sub_event": None,
+                },
             }
         try:
             loaded = json.loads(self.path.read_text(encoding="utf-8"))
@@ -60,7 +63,10 @@ class DailyProgress:
                 "optimizer": {"active_minutes": 0, "opening_gold": None},
                 "economy_profile": {},
                 "work_hire_unavailable_uins": [],
-                "rotation": {"last_school_attribute": None},
+                "rotation": {
+                    "last_school_attribute": None,
+                    "last_work_job_sub_event": None,
+                },
             }
         loaded.setdefault("history", [])
         loaded.setdefault("pending", None)
@@ -71,6 +77,11 @@ class DailyProgress:
         loaded.setdefault("economy_profile", {})
         loaded.setdefault("work_hire_unavailable_uins", [])
         loaded.setdefault("rotation", {"last_school_attribute": None})
+        rotation = loaded.get("rotation")
+        if not isinstance(rotation, dict):
+            loaded["rotation"] = {"last_school_attribute": None}
+        loaded["rotation"].setdefault("last_school_attribute", None)
+        loaded["rotation"].setdefault("last_work_job_sub_event", None)
         loaded["counts"] = {**EMPTY_COUNTS, **loaded.get("counts", {})}
         return loaded
 
@@ -103,7 +114,10 @@ class DailyProgress:
                     "encouraged_story_ids": [],
                     "optimizer": {"active_minutes": 0, "opening_gold": None},
                     "work_hire_unavailable_uins": [],
-                    "rotation": {"last_school_attribute": None},
+                    "rotation": {
+                        "last_school_attribute": None,
+                        "last_work_job_sub_event": None,
+                    },
                 }
             )
             self._save()
@@ -187,6 +201,25 @@ class DailyProgress:
                 "rotation", {"last_school_attribute": None}
             )
             rotation["last_school_attribute"] = str(attribute)
+            self._save()
+
+    def last_work_job_sub_event(self) -> int:
+        value = self.snapshot().get("rotation", {}).get("last_work_job_sub_event")
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def record_last_work_job_sub_event(self, sub_event: int) -> None:
+        value = int(sub_event or 0)
+        if value <= 0:
+            return
+        with self._lock:
+            self.rollover()
+            rotation = self._state.setdefault(
+                "rotation", {"last_school_attribute": None}
+            )
+            rotation["last_work_job_sub_event"] = value
             self._save()
 
     def mark_work_hire_unavailable(self, uin: str) -> None:

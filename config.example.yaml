@@ -41,7 +41,8 @@
     "strategy": "shortest_duration",
     "limit_enabled": false,
     "times_per_day": 20,
-    "employ_friend": true
+    "employ_friend": true,
+    "job_rotation": false
   },
   "adventure": {
     "enabled": true,

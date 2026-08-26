@@ -68,6 +68,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "hire_friend_uin": "",
         "hire_friend_pet_id": "",
         "hire_friend_name": "",
+        "job_rotation": False,
     },
     "adventure": {
         "enabled": True,

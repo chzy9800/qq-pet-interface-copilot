@@ -1335,6 +1335,7 @@ class NapCatClient:
         strategy: str = "shortest_duration",
         hired_pet_id: str = "",
         excluded_sub_events: tuple[int, ...] = (),
+        rotation_exclude_sub_events: tuple[int, ...] = (),
     ) -> WorkJob:
         if strategy not in {"shortest_duration", "highest_total"}:
             raise QQPetError(f"未知岗位选择策略：{strategy}")
@@ -1432,6 +1433,19 @@ class NapCatClient:
                     job.sub_event_type,
                 ),
             )
+        # "最短时长岗位轮换": among the jobs tied for the shortest duration,
+        # skip the previously used one so consecutive runs rotate instead of
+        # always picking the same shortest job.  A single shortest job stays
+        # untouched because there is nothing to rotate with.
+        shortest = min(job.duration_seconds for job in jobs)
+        shortest_jobs = [job for job in jobs if job.duration_seconds == shortest]
+        rotation_excluded = {int(value) for value in rotation_exclude_sub_events}
+        if len(shortest_jobs) > 1 and rotation_excluded:
+            remaining = [
+                job for job in shortest_jobs if job.sub_event_type not in rotation_excluded
+            ]
+            if remaining:
+                jobs = remaining
         return min(
             jobs,
             key=lambda job: (
@@ -1450,6 +1464,7 @@ class NapCatClient:
         strategy: str = "shortest_duration",
         hired_user_id: str = "",
         hired_pet_id: str = "",
+        rotation_exclude_sub_events: tuple[int, ...] = (),
     ) -> WorkStartResult:
         if bool(hired_user_id) != bool(hired_pet_id):
             raise QQPetError("雇佣好友时必须同时提供好友账号和宠物 ID")
@@ -1458,6 +1473,8 @@ class NapCatClient:
             preferred_sub_event,
             strategy,
             hired_pet_id,
+            (),
+            rotation_exclude_sub_events,
         )
         body = (
             field_varint(1, 6400)

@@ -1449,6 +1449,66 @@ class ProgressAndSchedulerTests(unittest.TestCase):
             self.assertEqual(fake.assert_no_hire, ("", ""))
             self.assertEqual(scheduler.progress.snapshot()["pending"]["kind"], "work")
 
+    def test_run_once_job_rotation_persists_and_excludes_last_job(self) -> None:
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            store = ConfigStore(root / "config.yaml")
+            config = store.data
+            config["scheduler"]["coin_threshold"] = 500
+            config["adventure"]["enabled"] = False
+            config["safety"]["safe_mode"] = False
+            config["safety"]["allow_experimental_scene_actions"] = True
+            config["work"]["employ_friend"] = False
+            config["work"]["job_rotation"] = True
+            store.save(config)
+
+            class FakeClient:
+                rotation_calls: list = []
+
+                def query_values(self):
+                    return PetValues(gold=1, hunger=100, clean=100)
+
+                def query_story(self):
+                    return StoryStatus()
+
+                def query_food_inventory(self):
+                    return FoodInventory(biscuits=12, shrimp=10)
+
+                def start_work(
+                    self,
+                    career_type,
+                    preferred_sub_event,
+                    strategy,
+                    hired_user_id,
+                    hired_pet_id,
+                    rotation_exclude_sub_events=(),
+                ):
+                    self.rotation_calls.append(rotation_exclude_sub_events)
+                    return WorkStartResult(
+                        WorkJob(
+                            1,
+                            "涂鸦小徒",
+                            "熬夜赶参赛稿",
+                            6411004,
+                            "金币 539",
+                            "4小时",
+                            can_do=True,
+                        ),
+                        "6400_created",
+                    )
+
+            fake = FakeClient()
+            scheduler = Scheduler(
+                root / "config.yaml",
+                root / "progress.json",
+                client_factory=lambda _config: fake,
+            )
+            self.assertEqual(scheduler.run_once(), "work")
+            scheduler.progress.clear_pending()
+            self.assertEqual(scheduler.run_once(), "work")
+            self.assertEqual(fake.rotation_calls, [(), (6411004,)])
+            self.assertEqual(scheduler.progress.last_work_job_sub_event(), 6411004)
+
     def test_run_once_employs_verified_friend_for_work(self) -> None:
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
