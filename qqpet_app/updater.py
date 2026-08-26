@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Callable
 
 
-REPOSITORY = "yikehuang/qq-pet-interface-copilot"
+REPOSITORY = "chzy9800/qq-pet-interface-copilot"
 LATEST_RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
 ASSET_NAME = "QQ-Pet-Interface-Copilot-Windows-x64.zip"
 MAX_DOWNLOAD_BYTES = 200 * 1024 * 1024

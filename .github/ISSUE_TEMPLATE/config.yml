@@ -1,6 +1,6 @@
 blank_issues_enabled: false
 contact_links:
   - name: 私密安全漏洞报告
-    url: https://github.com/yikehuang/qq-pet-interface-copilot/security/advisories/new
+    url: https://github.com/chzy9800/qq-pet-interface-copilot/security/advisories/new
     about: 请在这里私密报告安全漏洞，不要创建公开 Issue。
 
